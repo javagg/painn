@@ -648,24 +648,36 @@ fn draw_shape_vello(scene: &mut vello::Scene, transform: Affine, shape: &Shape) 
             );
         }
         Shape::Polygon {
-            points,
+            outer,
+            holes,
             stroke_color,
             fill_color,
             stroke_width,
         } => {
-            if points.len() < 3 {
+            if outer.len() < 3 {
                 return;
             }
 
             let mut path = BezPath::new();
-            path.move_to((points[0].x as f64, points[0].y as f64));
-            for p in points.iter().skip(1) {
+            path.move_to((outer[0].x as f64, outer[0].y as f64));
+            for p in outer.iter().skip(1) {
                 path.line_to((p.x as f64, p.y as f64));
             }
             path.close_path();
 
+            for hole in holes {
+                if hole.len() < 3 {
+                    continue;
+                }
+                path.move_to((hole[0].x as f64, hole[0].y as f64));
+                for p in hole.iter().skip(1) {
+                    path.line_to((p.x as f64, p.y as f64));
+                }
+                path.close_path();
+            }
+
             if let Some(fill) = *fill_color {
-                scene.fill(Fill::NonZero, transform, iced_to_vello(fill), None, &path);
+                scene.fill(Fill::EvenOdd, transform, iced_to_vello(fill), None, &path);
             }
 
             scene.stroke(
@@ -760,7 +772,8 @@ fn preview_shape(
             }
 
             Some(Shape::Polygon {
-                points,
+                outer: points,
+                holes: Vec::new(),
                 stroke_color: preview_stroke_color,
                 fill_color,
                 stroke_width,

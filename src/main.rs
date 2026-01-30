@@ -6,6 +6,43 @@ use drawing::{CanvasEvent, Draft, Shape, Tool};
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
+use i_float::int::point::IntPoint;
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay::Overlay;
+use i_overlay::core::overlay_rule::OverlayRule;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BooleanMode {
+    Add,
+    Merge,
+    Mask,
+    Diff,
+}
+
+impl BooleanMode {
+    const ALL: [BooleanMode; 4] = [
+        BooleanMode::Add,
+        BooleanMode::Merge,
+        BooleanMode::Mask,
+        BooleanMode::Diff,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            BooleanMode::Add => "Add",
+            BooleanMode::Merge => "Merge",
+            BooleanMode::Mask => "Mask",
+            BooleanMode::Diff => "Diff",
+        }
+    }
+}
+
+impl std::fmt::Display for BooleanMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Draw,
@@ -17,6 +54,7 @@ enum Tab {
 enum Message {
     TabChanged(Tab),
     ToolChanged(Tool),
+    ModeChanged(BooleanMode),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
@@ -36,6 +74,7 @@ fn wrap_canvas_event(e: CanvasEvent) -> Message {
 struct App {
     active_tab: Tab,
     tool: Tool,
+    mode: BooleanMode,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -55,6 +94,7 @@ impl App {
         Self {
             active_tab: Tab::Draw,
             tool: Tool::Line,
+            mode: BooleanMode::Add,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -89,6 +129,10 @@ impl App {
                 self.reset_draft();
                 self.dragging = false;
                 self.drag_last = None;
+                self.invalidate();
+            }
+            Message::ModeChanged(mode) => {
+                self.mode = mode;
                 self.invalidate();
             }
             Message::StrokeWidthChanged(w) => {
@@ -256,7 +300,7 @@ impl App {
                         self.stroke_color,
                         self.fill_color,
                     ) {
-                        self.shapes.push(shape);
+                        self.commit_new_shape(shape);
                     }
 
                     self.reset_draft();
@@ -284,8 +328,9 @@ impl App {
                     Tool::Polygon => {
                         if self.draft.polygon_points.len() >= 3 {
                             let points = std::mem::take(&mut self.draft.polygon_points);
-                            self.shapes.push(Shape::Polygon {
-                                points,
+                            self.commit_new_shape(Shape::Polygon {
+                                outer: points,
+                                holes: Vec::new(),
                                 stroke_color: self.stroke_color,
                                 fill_color: self.fill_color,
                                 stroke_width: self.stroke_width,
@@ -304,6 +349,187 @@ impl App {
         }
     }
 
+    fn commit_new_shape(&mut self, shape: Shape) {
+        match self.mode {
+            BooleanMode::Add => {
+                self.shapes.push(shape);
+                self.invalidate();
+            }
+            BooleanMode::Merge | BooleanMode::Mask | BooleanMode::Diff => {
+                if !Self::shape_is_region(&shape) {
+                    self.shapes.push(shape);
+                    self.invalidate();
+                    return;
+                }
+
+                let stroke_color = self.stroke_color;
+                let fill_color = self.fill_color;
+                let stroke_width = self.stroke_width;
+
+                let new_contours = Self::shape_to_int_contours(&shape);
+                if new_contours.is_empty() {
+                    return;
+                }
+
+                let mut non_region = Vec::new();
+                let mut existing_region_contours: Vec<Vec<IntPoint>> = Vec::new();
+                for s in self.shapes.drain(..) {
+                    if Self::shape_is_region(&s) {
+                        existing_region_contours.extend(Self::shape_to_int_contours(&s));
+                    } else {
+                        non_region.push(s);
+                    }
+                }
+
+                let rule = match self.mode {
+                    BooleanMode::Merge => OverlayRule::Union,
+                    BooleanMode::Mask => OverlayRule::Intersect,
+                    BooleanMode::Diff => OverlayRule::Difference,
+                    BooleanMode::Add => unreachable!(),
+                };
+
+                let result = if existing_region_contours.is_empty() {
+                    match self.mode {
+                        BooleanMode::Merge => Self::int_shapes_to_shapes(
+                            vec![new_contours.clone()],
+                            stroke_color,
+                            fill_color,
+                            stroke_width,
+                        ),
+                        BooleanMode::Mask | BooleanMode::Diff => Vec::new(),
+                        BooleanMode::Add => unreachable!(),
+                    }
+                } else {
+                    let capacity = existing_region_contours
+                        .iter()
+                        .map(|c| c.len())
+                        .sum::<usize>()
+                        + new_contours.iter().map(|c| c.len()).sum::<usize>();
+                    let mut overlay = Overlay::new(capacity);
+                    for c in &existing_region_contours {
+                        overlay.add_contour(c, i_overlay::core::overlay::ShapeType::Subject);
+                    }
+                    for c in &new_contours {
+                        overlay.add_contour(c, i_overlay::core::overlay::ShapeType::Clip);
+                    }
+
+                    let int_shapes = overlay.overlay(rule, FillRule::EvenOdd);
+                    Self::int_shapes_to_shapes(int_shapes, stroke_color, fill_color, stroke_width)
+                };
+
+                self.shapes = non_region;
+                self.shapes.extend(result);
+                self.selected = None;
+                self.dragging = false;
+                self.drag_last = None;
+                self.invalidate();
+            }
+        }
+    }
+
+
+    const BOOL_SCALE: f32 = 1000.0;
+
+    fn shape_is_region(shape: &Shape) -> bool {
+    matches!(shape, Shape::Rect { .. } | Shape::Circle { .. } | Shape::Polygon { .. })
+}
+
+    fn p_to_int(p: iced::Point) -> IntPoint {
+    let x = (p.x * Self::BOOL_SCALE).round();
+    let y = (p.y * Self::BOOL_SCALE).round();
+    IntPoint::new(
+        x.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+        y.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+    )
+}
+
+    fn int_to_p(p: IntPoint) -> iced::Point {
+    iced::Point {
+        x: (p.x as f32) / Self::BOOL_SCALE,
+        y: (p.y as f32) / Self::BOOL_SCALE,
+    }
+}
+
+    fn shape_to_int_contours(shape: &Shape) -> Vec<Vec<IntPoint>> {
+    match shape {
+        Shape::Rect { from, to, .. } => {
+            let x0 = from.x.min(to.x);
+            let y0 = from.y.min(to.y);
+            let x1 = from.x.max(to.x);
+            let y1 = from.y.max(to.y);
+            vec![vec![
+                Self::p_to_int(iced::Point { x: x0, y: y0 }),
+                Self::p_to_int(iced::Point { x: x1, y: y0 }),
+                Self::p_to_int(iced::Point { x: x1, y: y1 }),
+                Self::p_to_int(iced::Point { x: x0, y: y1 }),
+            ]]
+        }
+        Shape::Circle { center, radius, .. } => {
+            let steps = 64usize;
+            let mut contour = Vec::with_capacity(steps);
+            for i in 0..steps {
+                let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+                contour.push(Self::p_to_int(iced::Point {
+                    x: center.x + radius * t.cos(),
+                    y: center.y + radius * t.sin(),
+                }));
+            }
+            vec![contour]
+        }
+        Shape::Polygon { outer, holes, .. } => {
+            if outer.len() < 3 {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            out.push(outer.iter().map(|p| Self::p_to_int(*p)).collect());
+            for hole in holes {
+                if hole.len() < 3 {
+                    continue;
+                }
+                out.push(hole.iter().map(|p| Self::p_to_int(*p)).collect());
+            }
+            out
+        }
+        Shape::Line { .. } | Shape::Spline { .. } => Vec::new(),
+    }
+}
+
+    fn int_shapes_to_shapes(
+    int_shapes: Vec<Vec<Vec<IntPoint>>>,
+    stroke_color: Color,
+    fill_color: Option<Color>,
+    stroke_width: f32,
+) -> Vec<Shape> {
+    let mut out = Vec::new();
+    for shape in int_shapes {
+        if shape.is_empty() {
+            continue;
+        }
+        let outer = shape[0]
+            .iter()
+            .copied()
+            .map(Self::int_to_p)
+            .collect::<Vec<_>>();
+        if outer.len() < 3 {
+            continue;
+        }
+        let holes = shape
+            .iter()
+            .skip(1)
+            .map(|c| c.iter().copied().map(Self::int_to_p).collect::<Vec<_>>())
+            .filter(|c| c.len() >= 3)
+            .collect::<Vec<_>>();
+        out.push(Shape::Polygon {
+            outer,
+            holes,
+            stroke_color,
+            fill_color,
+            stroke_width,
+        });
+    }
+    out
+}
+
     fn view(&self) -> Element<'_, Message> {
         let tab_bar = row![
             tab_button("画图", Tab::Draw, self.active_tab),
@@ -317,6 +543,9 @@ impl App {
             row![
                 text("工具"),
                 pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
+                    .width(Length::Fixed(120.0)),
+                text("模式"),
+                pick_list(BooleanMode::ALL.as_slice(), Some(self.mode), Message::ModeChanged)
                     .width(Length::Fixed(120.0)),
                 text("线宽"),
                 slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)

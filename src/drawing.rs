@@ -70,7 +70,8 @@ pub enum Shape {
         stroke_width: f32,
     },
     Polygon {
-        points: Vec<Point>,
+        outer: Vec<Point>,
+        holes: Vec<Vec<Point>>,
         stroke_color: Color,
         fill_color: Option<Color>,
         stroke_width: f32,
@@ -130,20 +131,20 @@ impl Shape {
                 false
             }
             Shape::Polygon {
-                points,
-                fill_color,
+                outer,
+                holes,
                 stroke_width,
                 ..
             } => {
-                if points.len() < 3 {
+                if outer.len() < 3 {
                     return false;
                 }
 
-                if fill_color.is_some() && point_in_polygon(point, points) {
+                if point_in_polygon_with_holes(point, outer, holes.as_slice()) {
                     return true;
                 }
 
-                hit_test_polygon_outline(point, points, *stroke_width * 2.0)
+                hit_test_polygon_outline(point, outer, holes.as_slice(), *stroke_width * 2.0)
             }
         }
     }
@@ -172,15 +173,71 @@ impl Shape {
                     p.y += dy;
                 }
             }
-            Shape::Polygon { points, .. } => {
-                for p in points.iter_mut() {
+            Shape::Polygon { outer, holes, .. } => {
+                for p in outer.iter_mut() {
                     p.x += dx;
                     p.y += dy;
+                }
+                for hole in holes.iter_mut() {
+                    for p in hole.iter_mut() {
+                        p.x += dx;
+                        p.y += dy;
+                    }
                 }
             }
         }
     }
 }
+
+fn point_in_polygon_with_holes(point: Point, outer: &[Point], holes: &[Vec<Point>]) -> bool {
+    if !point_in_polygon(point, outer) {
+        return false;
+    }
+
+    for hole in holes {
+        if hole.len() >= 3 && point_in_polygon(point, hole) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn hit_test_polygon_outline(
+    point: Point,
+    outer: &[Point],
+    holes: &[Vec<Point>],
+    tolerance: f32,
+) -> bool {
+    if hit_test_polyline_closed(point, outer, tolerance) {
+        return true;
+    }
+
+    for hole in holes {
+        if hit_test_polyline_closed(point, hole, tolerance) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn hit_test_polyline_closed(point: Point, points: &[Point], tolerance: f32) -> bool {
+    if points.len() < 2 {
+        return false;
+    }
+
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        if distance_to_segment(point, a, b) <= tolerance {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[derive(Debug, Clone)]
 pub enum CanvasEvent {
     PressedLeft(Point),
@@ -452,21 +509,33 @@ fn draw_shape(frame: &mut Frame, shape: &Shape) {
             }
         }
         Shape::Polygon {
-            points,
+            outer,
+            holes,
             stroke_color,
             fill_color,
             stroke_width,
         } => {
-            if points.len() < 3 {
+            if outer.len() < 3 {
                 return;
             }
 
             let path = Path::new(|b| {
-                b.move_to(points[0]);
-                for p in points.iter().skip(1) {
+                b.move_to(outer[0]);
+                for p in outer.iter().skip(1) {
                     b.line_to(*p);
                 }
                 b.close();
+
+                for hole in holes {
+                    if hole.len() < 3 {
+                        continue;
+                    }
+                    b.move_to(hole[0]);
+                    for p in hole.iter().skip(1) {
+                        b.line_to(*p);
+                    }
+                    b.close();
+                }
             });
 
             if let Some(fill) = fill_color {
@@ -638,7 +707,8 @@ fn preview_shape(
             }
 
             Some(Shape::Polygon {
-                points: pts,
+                outer: pts,
+                holes: Vec::new(),
                 stroke_color: preview_stroke_color,
                 fill_color,
                 stroke_width,
@@ -708,21 +778,6 @@ fn point_in_polygon(point: Point, points: &[Point]) -> bool {
     inside
 }
 
-fn hit_test_polygon_outline(point: Point, points: &[Point], tolerance: f32) -> bool {
-    if points.len() < 2 {
-        return false;
-    }
-
-    for i in 0..points.len() {
-        let a = points[i];
-        let b = points[(i + 1) % points.len()];
-        if distance_to_segment(point, a, b) <= tolerance {
-            return true;
-        }
-    }
-
-    false
-}
 
 /// Catmull–Rom spline sampled to a polyline.
 ///
