@@ -10,15 +10,17 @@ pub enum Tool {
     Rect,
     Circle,
     Spline,
+    Polygon,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 6] = [
         Tool::Select,
         Tool::Line,
         Tool::Rect,
         Tool::Circle,
         Tool::Spline,
+        Tool::Polygon,
     ];
 
     pub fn label(self) -> &'static str {
@@ -28,6 +30,7 @@ impl Tool {
             Tool::Rect => "矩形",
             Tool::Circle => "圆",
             Tool::Spline => "样条",
+            Tool::Polygon => "多边形",
         }
     }
 }
@@ -64,6 +67,12 @@ pub enum Shape {
     Spline {
         points: Vec<Point>,
         stroke_color: Color,
+        stroke_width: f32,
+    },
+    Polygon {
+        points: Vec<Point>,
+        stroke_color: Color,
+        fill_color: Option<Color>,
         stroke_width: f32,
     },
 }
@@ -120,6 +129,22 @@ impl Shape {
 
                 false
             }
+            Shape::Polygon {
+                points,
+                fill_color,
+                stroke_width,
+                ..
+            } => {
+                if points.len() < 3 {
+                    return false;
+                }
+
+                if fill_color.is_some() && point_in_polygon(point, points) {
+                    return true;
+                }
+
+                hit_test_polygon_outline(point, points, *stroke_width * 2.0)
+            }
         }
     }
 
@@ -147,6 +172,12 @@ impl Shape {
                     p.y += dy;
                 }
             }
+            Shape::Polygon { points, .. } => {
+                for p in points.iter_mut() {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
         }
     }
 }
@@ -165,6 +196,7 @@ pub struct Draft {
     pub start: Option<Point>,
     pub current: Option<Point>,
     pub spline_points: Vec<Point>,
+    pub polygon_points: Vec<Point>,
 }
 
 pub fn canvas<'a, Message>(
@@ -419,6 +451,35 @@ fn draw_shape(frame: &mut Frame, shape: &Shape) {
                 frame.stroke(&path, stroke);
             }
         }
+        Shape::Polygon {
+            points,
+            stroke_color,
+            fill_color,
+            stroke_width,
+        } => {
+            if points.len() < 3 {
+                return;
+            }
+
+            let path = Path::new(|b| {
+                b.move_to(points[0]);
+                for p in points.iter().skip(1) {
+                    b.line_to(*p);
+                }
+                b.close();
+            });
+
+            if let Some(fill) = fill_color {
+                frame.fill(&path, *fill);
+            }
+
+            let stroke = Stroke {
+                width: *stroke_width,
+                style: canvas::Style::Solid(*stroke_color),
+                ..Stroke::default()
+            };
+            frame.stroke(&path, stroke);
+        }
     }
 }
 
@@ -555,6 +616,34 @@ fn preview_shape(
                 None
             }
         }
+        Tool::Polygon => {
+            if draft.polygon_points.len() < 2 {
+                return None;
+            }
+
+            let mut pts = draft.polygon_points.clone();
+            if let Some(current) = draft.current {
+                if pts.last().copied() != Some(current) {
+                    pts.push(current);
+                }
+            }
+
+            if pts.len() < 3 {
+                return Some(Shape::Line {
+                    from: pts[0],
+                    to: *pts.last().unwrap(),
+                    stroke_color: preview_stroke_color,
+                    stroke_width,
+                });
+            }
+
+            Some(Shape::Polygon {
+                points: pts,
+                stroke_color: preview_stroke_color,
+                fill_color,
+                stroke_width,
+            })
+        }
     }
 }
 
@@ -591,6 +680,48 @@ fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {
     let dx = p.x - cx;
     let dy = p.y - cy;
     (dx * dx + dy * dy).sqrt()
+}
+
+fn point_in_polygon(point: Point, points: &[Point]) -> bool {
+    // Ray casting algorithm (even-odd rule)
+    if points.len() < 3 {
+        return false;
+    }
+
+    let mut inside = false;
+    let mut j = points.len() - 1;
+    for i in 0..points.len() {
+        let pi = points[i];
+        let pj = points[j];
+
+        let intersect = ((pi.y > point.y) != (pj.y > point.y))
+            && (point.x
+                < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y + f32::EPSILON) + pi.x);
+
+        if intersect {
+            inside = !inside;
+        }
+
+        j = i;
+    }
+
+    inside
+}
+
+fn hit_test_polygon_outline(point: Point, points: &[Point], tolerance: f32) -> bool {
+    if points.len() < 2 {
+        return false;
+    }
+
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        if distance_to_segment(point, a, b) <= tolerance {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Catmull–Rom spline sampled to a polyline.

@@ -10,7 +10,6 @@ use iced::{Alignment, Color, Element, Length, Size, Task};
 enum Tab {
     Draw,
     Scene,
-    Vello,
     About,
 }
 
@@ -49,7 +48,6 @@ struct App {
     dragging: bool,
     drag_last: Option<iced::Point>,
     draft: Draft,
-    cache: iced::widget::canvas::Cache,
 }
 
 impl App {
@@ -69,12 +67,11 @@ impl App {
             dragging: false,
             drag_last: None,
             draft: Draft::default(),
-            cache: iced::widget::canvas::Cache::default(),
         }
     }
 
     fn invalidate(&mut self) {
-        self.cache.clear();
+        // Vello-backed canvas does not use iced::canvas caching.
     }
 
     fn reset_draft(&mut self) {
@@ -211,6 +208,13 @@ impl App {
                     self.draft.spline_points.push(p);
                     self.invalidate();
                 }
+                Tool::Polygon => {
+                    self.cursor_pos = Some(p);
+                    self.selected = None;
+                    self.draft.current = Some(p);
+                    self.draft.polygon_points.push(p);
+                    self.invalidate();
+                }
             },
             CanvasEvent::Moved(p) => {
                 self.cursor_pos = Some(p);
@@ -258,26 +262,41 @@ impl App {
                     self.reset_draft();
                     self.invalidate();
                 }
-                Tool::Spline => {
+                Tool::Spline | Tool::Polygon => {
                     self.cursor_pos = Some(p);
                 }
             },
             CanvasEvent::PressedRight(_p) => {
-                if self.tool != Tool::Spline {
-                    return;
-                }
+                match self.tool {
+                    Tool::Spline => {
+                        if self.draft.spline_points.len() >= 2 {
+                            let points = std::mem::take(&mut self.draft.spline_points);
+                            self.shapes.push(Shape::Spline {
+                                points,
+                                stroke_color: self.stroke_color,
+                                stroke_width: self.stroke_width,
+                            });
+                        }
 
-                if self.draft.spline_points.len() >= 2 {
-                    let points = std::mem::take(&mut self.draft.spline_points);
-                    self.shapes.push(Shape::Spline {
-                        points,
-                        stroke_color: self.stroke_color,
-                        stroke_width: self.stroke_width,
-                    });
-                }
+                        self.reset_draft();
+                        self.invalidate();
+                    }
+                    Tool::Polygon => {
+                        if self.draft.polygon_points.len() >= 3 {
+                            let points = std::mem::take(&mut self.draft.polygon_points);
+                            self.shapes.push(Shape::Polygon {
+                                points,
+                                stroke_color: self.stroke_color,
+                                fill_color: self.fill_color,
+                                stroke_width: self.stroke_width,
+                            });
+                        }
 
-                self.reset_draft();
-                self.invalidate();
+                        self.reset_draft();
+                        self.invalidate();
+                    }
+                    _ => {}
+                }
             }
             CanvasEvent::ZoomAt { .. } => {
                 // Zoom handled in update
@@ -289,7 +308,6 @@ impl App {
         let tab_bar = row![
             tab_button("画图", Tab::Draw, self.active_tab),
             tab_button("渲染", Tab::Scene, self.active_tab),
-            tab_button("Vello", Tab::Vello, self.active_tab),
             tab_button("说明", Tab::About, self.active_tab),
         ]
         .spacing(8)
@@ -347,6 +365,7 @@ impl App {
         let hint = match self.tool {
             Tool::Select => "选择：左键点击图形；可删除选中",
             Tool::Spline => "样条：左键加点，右键结束",
+            Tool::Polygon => "多边形：左键加点，右键闭合结束",
             _ => "拖拽绘制：按下-移动-松开",
         };
 
@@ -365,22 +384,7 @@ impl App {
             .align_y(Alignment::Center)
         };
 
-        let board = drawing::canvas(
-            &self.cache,
-            self.tool,
-            self.shapes.as_slice(),
-            &self.draft,
-            self.stroke_width,
-            self.stroke_color,
-            self.fill_color,
-            self.show_grid,
-            self.zoom,
-            self.view_offset,
-            self.cursor_pos,
-            wrap_canvas_event,
-        );
-
-        let vello_board = canvas::canvas(
+        let board = canvas::canvas(
             self.tool,
             self.shapes.as_slice(),
             &self.draft,
@@ -405,6 +409,7 @@ impl App {
             text("- 选择：左键点击图形，可拖拽移动"),
             text("- 线/矩形/圆：拖拽绘制"),
             text("- 样条：左键加点，右键结束"),
+            text("- 多边形：左键加点，右键结束"),
             text("- 滚轮缩放，按钮可重置"),
         ]
         .spacing(6)
@@ -417,16 +422,9 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let vello_tab = column![toolbar(), stroke_row(), fill_row(), vello_board, status()]
-            .spacing(10)
-            .padding(12)
-            .width(Length::Fill)
-            .height(Length::Fill);
-
         let content = match self.active_tab {
             Tab::Draw => draw_tab,
             Tab::Scene => scene_tab,
-            Tab::Vello => vello_tab,
             Tab::About => about_tab,
         };
 
@@ -480,7 +478,7 @@ fn finish_drag_shape(
                 stroke_width,
             })
         }
-        Tool::Spline => None,
+        Tool::Spline | Tool::Polygon => None,
     }
 }
 
@@ -490,6 +488,7 @@ fn apply_stroke_color(shape: &mut Shape, color: Color) {
         Shape::Rect { stroke_color, .. } => *stroke_color = color,
         Shape::Circle { stroke_color, .. } => *stroke_color = color,
         Shape::Spline { stroke_color, .. } => *stroke_color = color,
+        Shape::Polygon { stroke_color, .. } => *stroke_color = color,
     }
 }
 
@@ -497,6 +496,7 @@ fn apply_fill_color(shape: &mut Shape, color: Option<Color>) {
     match shape {
         Shape::Rect { fill_color, .. } => *fill_color = color,
         Shape::Circle { fill_color, .. } => *fill_color = color,
+        Shape::Polygon { fill_color, .. } => *fill_color = color,
         Shape::Line { .. } | Shape::Spline { .. } => {}
     }
 }
@@ -507,6 +507,7 @@ fn apply_stroke_width(shape: &mut Shape, width: f32) {
         Shape::Rect { stroke_width, .. } => *stroke_width = width,
         Shape::Circle { stroke_width, .. } => *stroke_width = width,
         Shape::Spline { stroke_width, .. } => *stroke_width = width,
+        Shape::Polygon { stroke_width, .. } => *stroke_width = width,
     }
 }
 

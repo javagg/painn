@@ -414,6 +414,19 @@ impl shader::Primitive for Primitive {
             }
         }
 
+        if self.tool == Tool::Polygon && !self.draft.polygon_points.is_empty() {
+            for p in &self.draft.polygon_points {
+                let c = Circle::new((p.x as f64, p.y as f64), 3.5);
+                scene.fill(
+                    Fill::NonZero,
+                    transform,
+                    VelloColor::from_rgb8(0xB8, 0xE6, 0x2E),
+                    None,
+                    &c,
+                );
+            }
+        }
+
         if let Some(cursor) = self.cursor_pos {
             draw_crosshair_vello(
                 &mut scene,
@@ -634,6 +647,35 @@ fn draw_shape_vello(scene: &mut vello::Scene, transform: Affine, shape: &Shape) 
                 &path,
             );
         }
+        Shape::Polygon {
+            points,
+            stroke_color,
+            fill_color,
+            stroke_width,
+        } => {
+            if points.len() < 3 {
+                return;
+            }
+
+            let mut path = BezPath::new();
+            path.move_to((points[0].x as f64, points[0].y as f64));
+            for p in points.iter().skip(1) {
+                path.line_to((p.x as f64, p.y as f64));
+            }
+            path.close_path();
+
+            if let Some(fill) = *fill_color {
+                scene.fill(Fill::NonZero, transform, iced_to_vello(fill), None, &path);
+            }
+
+            scene.stroke(
+                &Stroke::new(*stroke_width as f64),
+                transform,
+                iced_to_vello(*stroke_color),
+                None,
+                &path,
+            );
+        }
     }
 }
 
@@ -694,6 +736,33 @@ fn preview_shape(
             Some(Shape::Spline {
                 points: draft.spline_points.clone(),
                 stroke_color: preview_stroke_color,
+                stroke_width,
+            })
+        }
+        Tool::Polygon => {
+            if draft.polygon_points.len() < 2 {
+                return None;
+            }
+
+            let mut points = draft.polygon_points.clone();
+            if let Some(current) = draft.current {
+                // Live preview includes current cursor as the next vertex.
+                points.push(current);
+            }
+
+            if points.len() < 3 {
+                return Some(Shape::Line {
+                    from: points[0],
+                    to: *points.last().unwrap(),
+                    stroke_color: preview_stroke_color,
+                    stroke_width,
+                });
+            }
+
+            Some(Shape::Polygon {
+                points,
+                stroke_color: preview_stroke_color,
+                fill_color,
                 stroke_width,
             })
         }
