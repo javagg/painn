@@ -129,6 +129,7 @@ pub enum CanvasEvent {
     ReleasedLeft(Point),
     Moved(Point),
     PressedRight(Point),
+    ZoomAt { delta: f32, cursor: Point },
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +148,9 @@ pub fn canvas<'a, Message>(
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
+    show_grid: bool,
+    zoom: f32,
+    view_offset: Point,
     on_event: fn(CanvasEvent) -> Message,
 ) -> Element<'a, Message>
 where
@@ -160,6 +164,9 @@ where
         stroke_width,
         stroke_color,
         fill_color,
+        show_grid,
+        zoom,
+        view_offset,
         on_event,
     })
     .width(Length::Fill)
@@ -175,6 +182,9 @@ struct Board<'a, Message> {
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
+    show_grid: bool,
+    zoom: f32,
+    view_offset: Point,
     on_event: fn(CanvasEvent) -> Message,
 }
 
@@ -194,18 +204,30 @@ impl<Message> Program<Message> for Board<'_, Message> {
             return None;
         };
 
+        let world_pos = Point {
+            x: (pos.x - self.view_offset.x) / self.zoom,
+            y: (pos.y - self.view_offset.y) / self.zoom,
+        };
+
         let message = match event {
             canvas::Event::Mouse(MouseEvent::ButtonPressed(Button::Left)) => {
-                (self.on_event)(CanvasEvent::PressedLeft(pos))
+                (self.on_event)(CanvasEvent::PressedLeft(world_pos))
             }
             canvas::Event::Mouse(MouseEvent::ButtonReleased(Button::Left)) => {
-                (self.on_event)(CanvasEvent::ReleasedLeft(pos))
+                (self.on_event)(CanvasEvent::ReleasedLeft(world_pos))
             }
             canvas::Event::Mouse(MouseEvent::ButtonPressed(Button::Right)) => {
-                (self.on_event)(CanvasEvent::PressedRight(pos))
+                (self.on_event)(CanvasEvent::PressedRight(world_pos))
             }
             canvas::Event::Mouse(MouseEvent::CursorMoved { .. }) => {
-                (self.on_event)(CanvasEvent::Moved(pos))
+                (self.on_event)(CanvasEvent::Moved(world_pos))
+            }
+            canvas::Event::Mouse(MouseEvent::WheelScrolled { delta }) => {
+                let amount = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y,
+                };
+                (self.on_event)(CanvasEvent::ZoomAt { delta: amount, cursor: pos })
             }
             _ => return None,
         };
@@ -225,6 +247,16 @@ impl<Message> Program<Message> for Board<'_, Message> {
 
         let geo = self.cache.draw(renderer, bounds.size(), |frame: &mut Frame| {
             frame.fill_rectangle(Point::ORIGIN, frame.size(), Color::from_rgb8(0x12, 0x12, 0x14));
+
+            frame.translate(iced::Vector {
+                x: self.view_offset.x,
+                y: self.view_offset.y,
+            });
+            frame.scale(self.zoom);
+
+            if self.show_grid {
+                draw_grid(frame);
+            }
 
             for shape in self.shapes {
                 draw_shape(frame, shape);
@@ -353,6 +385,41 @@ fn draw_shape(frame: &mut Frame, shape: &Shape) {
                 frame.stroke(&path, stroke);
             }
         }
+    }
+}
+
+fn draw_grid(frame: &mut Frame) {
+    let size = frame.size();
+    let spacing = 24.0;
+    let minor = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.06);
+    let major = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.12);
+
+    let mut x = 0.0;
+    let mut index = 0usize;
+    while x <= size.width {
+        let color = if index % 5 == 0 { major } else { minor };
+        let stroke = Stroke {
+            width: 1.0,
+            style: canvas::Style::Solid(color),
+            ..Stroke::default()
+        };
+        frame.stroke(&Path::line(Point { x, y: 0.0 }, Point { x, y: size.height }), stroke);
+        x += spacing;
+        index += 1;
+    }
+
+    let mut y = 0.0;
+    let mut index = 0usize;
+    while y <= size.height {
+        let color = if index % 5 == 0 { major } else { minor };
+        let stroke = Stroke {
+            width: 1.0,
+            style: canvas::Style::Solid(color),
+            ..Stroke::default()
+        };
+        frame.stroke(&Path::line(Point { x: 0.0, y }, Point { x: size.width, y }), stroke);
+        y += spacing;
+        index += 1;
     }
 }
 

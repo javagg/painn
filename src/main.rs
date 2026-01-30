@@ -10,6 +10,8 @@ enum Message {
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
+    ToggleGrid,
+    ResetZoom,
     Undo,
     DeleteSelected,
     Clear,
@@ -26,6 +28,9 @@ struct App {
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
+    show_grid: bool,
+    zoom: f32,
+    view_offset: iced::Point,
     shapes: Vec<Shape>,
     selected: Option<usize>,
     draft: Draft,
@@ -39,6 +44,9 @@ impl App {
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
+            show_grid: true,
+            zoom: 1.0,
+            view_offset: iced::Point::ORIGIN,
             shapes: Vec::new(),
             selected: None,
             draft: Draft::default(),
@@ -82,6 +90,17 @@ impl App {
                 }
                 self.invalidate();
             }
+            Message::ToggleGrid => {
+                self.show_grid = !self.show_grid;
+                self.invalidate();
+            }
+            Message::ResetZoom => {
+                if (self.zoom - 1.0).abs() > f32::EPSILON {
+                    self.zoom = 1.0;
+                    self.view_offset = iced::Point::ORIGIN;
+                    self.invalidate();
+                }
+            }
             Message::Undo => {
                 self.shapes.pop();
                 self.selected = None;
@@ -102,7 +121,26 @@ impl App {
                 self.invalidate();
             }
             Message::Canvas(event) => {
-                self.handle_canvas_event(event);
+                match event {
+                    CanvasEvent::ZoomAt { delta, cursor } => {
+                        if delta.abs() > f32::EPSILON {
+                            let factor = if delta > 0.0 { 1.1 } else { 0.9 };
+                            let next = (self.zoom * factor).clamp(0.25, 4.0);
+                            if (next - self.zoom).abs() > f32::EPSILON {
+                                let world_x = (cursor.x - self.view_offset.x) / self.zoom;
+                                let world_y = (cursor.y - self.view_offset.y) / self.zoom;
+
+                                self.zoom = next;
+                                self.view_offset = iced::Point {
+                                    x: cursor.x - world_x * self.zoom,
+                                    y: cursor.y - world_y * self.zoom,
+                                };
+                                self.invalidate();
+                            }
+                        }
+                    }
+                    _ => self.handle_canvas_event(event),
+                }
             }
         }
 
@@ -189,6 +227,9 @@ impl App {
                 self.reset_draft();
                 self.invalidate();
             }
+            CanvasEvent::ZoomAt { .. } => {
+                // Zoom handled in update
+            }
         }
     }
 
@@ -201,6 +242,9 @@ impl App {
             slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)
                 .width(Length::Fixed(180.0)),
             text(format!("{:.1}", self.stroke_width)),
+            button(if self.show_grid { "网格：开" } else { "网格：关" })
+                .on_press(Message::ToggleGrid),
+            button("缩放重置").on_press(Message::ResetZoom),
             button("撤销").on_press(Message::Undo),
             button("删除选中")
                 .on_press_maybe(self.selected.map(|_| Message::DeleteSelected)),
@@ -237,6 +281,14 @@ impl App {
             _ => "拖拽绘制：按下-移动-松开",
         };
 
+        let status = row![
+            text(format!("缩放：{:.0}%", self.zoom * 100.0)),
+            text("|"),
+            text(hint),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+
         let board = drawing::canvas(
             &self.cache,
             self.tool,
@@ -245,10 +297,13 @@ impl App {
             self.stroke_width,
             self.stroke_color,
             self.fill_color,
+            self.show_grid,
+            self.zoom,
+            self.view_offset,
             wrap_canvas_event,
         );
 
-        column![toolbar, stroke_row, fill_row, text(hint), board]
+        column![toolbar, stroke_row, fill_row, board, status]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
