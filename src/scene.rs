@@ -38,57 +38,97 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 #[inline]
-fn mat4_scale(sx: f32, sy: f32, sz: f32) -> [[f32; 4]; 4] {
-    [
-        [sx, 0.0, 0.0, 0.0],
-        [0.0, sy, 0.0, 0.0],
-        [0.0, 0.0, sz, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-#[inline]
-fn mat4_rot_x(angle: f32) -> [[f32; 4]; 4] {
-    let (s, c) = angle.sin_cos();
+fn mat4_identity() -> [[f32; 4]; 4] {
     [
         [1.0, 0.0, 0.0, 0.0],
-        [0.0, c, s, 0.0],
-        [0.0, -s, c, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
 }
 
+type Vec3 = [f32; 3];
+
 #[inline]
-fn mat4_rot_y(angle: f32) -> [[f32; 4]; 4] {
-    let (s, c) = angle.sin_cos();
+fn vec3_add(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+#[inline]
+fn vec3_sub(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+#[inline]
+fn vec3_mul(a: Vec3, s: f32) -> Vec3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+#[inline]
+fn vec3_dot(a: Vec3, b: Vec3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[inline]
+fn vec3_cross(a: Vec3, b: Vec3) -> Vec3 {
     [
-        [c, 0.0, -s, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [s, 0.0, c, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+#[inline]
+fn vec3_normalize(v: Vec3) -> Vec3 {
+    let len2 = vec3_dot(v, v);
+    if len2 > 1.0e-12 {
+        let inv = 1.0 / len2.sqrt();
+        vec3_mul(v, inv)
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+#[inline]
+fn mat4_perspective(aspect: f32, fovy_radians: f32, z_near: f32, z_far: f32) -> [[f32; 4]; 4] {
+    let aspect = aspect.max(1.0e-6);
+    let f = 1.0 / (0.5 * fovy_radians).tan();
+    let nf = 1.0 / (z_near - z_far);
+
+    // Right-handed, depth range 0..1 (wgpu).
+    [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, z_far * nf, -1.0],
+        [0.0, 0.0, (z_near * z_far) * nf, 0.0],
+    ]
+}
+
+#[inline]
+fn mat4_look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> [[f32; 4]; 4] {
+    let f = vec3_normalize(vec3_sub(target, eye));
+    let s = vec3_normalize(vec3_cross(f, up));
+    let u = vec3_cross(s, f);
+
+    // Column-major.
+    let col0 = [s[0], s[1], s[2], 0.0];
+    let col1 = [u[0], u[1], u[2], 0.0];
+    let col2 = [-f[0], -f[1], -f[2], 0.0];
+    let col3 = [
+        -vec3_dot(s, eye),
+        -vec3_dot(u, eye),
+        vec3_dot(f, eye),
+        1.0,
+    ];
+
+    [col0, col1, col2, col3]
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
-    transform: [[f32; 4]; 4],
-}
-
-impl Uniforms {
-    fn from_pan_zoom(pan: [f32; 2], zoom: f32) -> Self {
-        let zoom = zoom.clamp(0.25, 8.0);
-
-        // WGSL matrices are column-major. Each inner [f32; 4] is a column.
-        let col0 = [zoom, 0.0, 0.0, 0.0];
-        let col1 = [0.0, zoom, 0.0, 0.0];
-        let col2 = [0.0, 0.0, 1.0, 0.0];
-        let col3 = [pan[0], pan[1], 0.0, 1.0];
-
-        Self {
-            transform: [col0, col1, col2, col3],
-        }
-    }
+    model_view: [[f32; 4]; 4],
+    mvp: [[f32; 4]; 4],
 }
 
 #[derive(Debug)]
@@ -99,6 +139,9 @@ pub struct Pipeline {
     index_count: u32,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    depth: wgpu::TextureView,
+    depth_size: (u32, u32),
+    last_bounds: (f32, f32, f32, f32),
 }
 
 impl shader::Pipeline for Pipeline {
@@ -109,12 +152,15 @@ impl shader::Pipeline for Pipeline {
     ) -> Self {
         use wgpu::util::DeviceExt;
 
+        const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_mesh_shader"),
             source: wgpu::ShaderSource::Wgsl(
                 r#"
 struct Uniforms {
-    transform: mat4x4<f32>,
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
 };
 
 @group(0) @binding(0)
@@ -133,11 +179,11 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = uniforms.transform * vec4<f32>(in.position, 1.0);
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
     let nmat = mat3x3<f32>(
-        uniforms.transform[0].xyz,
-        uniforms.transform[1].xyz,
-        uniforms.transform[2].xyz,
+        uniforms.model_view[0].xyz,
+        uniforms.model_view[1].xyz,
+        uniforms.model_view[2].xyz,
     );
     out.normal = normalize(nmat * in.normal);
     return out;
@@ -174,7 +220,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }],
             });
 
-        let initial_uniforms = Uniforms::from_pan_zoom([0.0, 0.0], 1.0);
+        let initial_uniforms = Uniforms {
+            model_view: mat4_identity(),
+            mvp: mat4_identity(),
+        };
         let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_mesh_uniforms"),
             contents: bytemuck::bytes_of(&initial_uniforms),
@@ -374,7 +423,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -390,6 +445,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             pipeline,
             vertices: vertex_buffer,
@@ -397,14 +468,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             index_count: tri_indices.len() as u32,
             uniforms,
             bind_group,
+            depth,
+            depth_size: (1, 1),
+            last_bounds: (0.0, 0.0, 1.0, 1.0),
         }
     }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Primitive {
-    pan: [f32; 2],
-    zoom: f32,
+    target: [f32; 3],
+    distance: f32,
     yaw: f32,
     pitch: f32,
 }
@@ -415,39 +489,126 @@ impl shader::Primitive for Primitive {
     fn prepare(
         &self,
         pipeline: &mut Self::Pipeline,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         bounds: &Rectangle,
-        _viewport: &Viewport,
+        viewport: &Viewport,
     ) {
-        let pan_zoom = Uniforms::from_pan_zoom(self.pan, self.zoom).transform;
+        // Ensure the depth buffer matches the swapchain (frame) size.
+        let physical = viewport.physical_size();
+        let target_w = physical.width.max(1);
+        let target_h = physical.height.max(1);
+
+        if pipeline.depth_size != (target_w, target_h) {
+            let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene_depth"),
+                size: wgpu::Extent3d {
+                    width: target_w,
+                    height: target_h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24Plus,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            pipeline.depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            pipeline.depth_size = (target_w, target_h);
+        }
+
+        // Store the widget bounds in physical pixels so we can set the viewport in `render`.
+        let scale = viewport.scale_factor();
+        pipeline.last_bounds = (
+            bounds.x * scale,
+            bounds.y * scale,
+            (bounds.width * scale).max(1.0),
+            (bounds.height * scale).max(1.0),
+        );
 
         let aspect = if bounds.height > 1.0 {
-            (bounds.width / bounds.height).max(1.0e-6)
+            bounds.width / bounds.height
         } else {
             1.0
         };
 
-        // Keep the model's aspect consistent with the view.
-        let aspect_fix = mat4_scale(1.0 / aspect, 1.0, 1.0);
-        let model = mat4_mul(mat4_rot_y(self.yaw), mat4_rot_x(self.pitch));
+        // CAD-like orbit camera around a target point.
+        let fovy = 45.0_f32.to_radians();
+        let z_near = 0.02;
+        let z_far = 500.0;
+        let distance = self.distance.clamp(0.1, 200.0);
 
-        let transform = mat4_mul(pan_zoom, mat4_mul(aspect_fix, model));
-        let uniforms = Uniforms { transform };
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let offset = [distance * cp * sy, distance * sp, distance * cp * cy];
+        let eye = vec3_add(self.target, offset);
+        let up = [0.0, 1.0, 0.0];
+
+        let view = mat4_look_at_rh(eye, self.target, up);
+        let proj = mat4_perspective(aspect, fovy, z_near, z_far);
+
+        let model = mat4_identity();
+        let model_view = mat4_mul(view, model);
+        let mvp = mat4_mul(proj, model_view);
+
+        let uniforms = Uniforms { model_view, mvp };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
     }
 
     fn draw(
         &self,
-        pipeline: &Self::Pipeline,
-        render_pass: &mut wgpu::RenderPass<'_>,
+        _pipeline: &Self::Pipeline,
+        _render_pass: &mut wgpu::RenderPass<'_>,
     ) -> bool {
+        // Use `render` so we can attach a depth buffer.
+        false
+    }
+
+    fn render(
+        &self,
+        pipeline: &Self::Pipeline,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        clip_bounds: &Rectangle<u32>,
+    ) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("scene_mesh_depth_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipeline.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        let (bx, by, bw, bh) = pipeline.last_bounds;
+        render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
+        render_pass.set_scissor_rect(
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width,
+            clip_bounds.height,
+        );
+
         render_pass.set_pipeline(&pipeline.pipeline);
         render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
         render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
         render_pass.set_index_buffer(pipeline.indices.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
-        true
     }
 }
 
@@ -456,8 +617,8 @@ pub struct Scene;
 
 #[derive(Debug, Clone)]
 pub struct SceneState {
-    zoom: f32,
-    pan: [f32; 2],
+    target: [f32; 3],
+    distance: f32,
     yaw: f32,
     pitch: f32,
     dragging: Dragging,
@@ -474,8 +635,8 @@ enum Dragging {
 impl Default for SceneState {
     fn default() -> Self {
         Self {
-            zoom: 1.0,
-            pan: [0.0, 0.0],
+            target: [0.0, 0.0, 0.0],
+            distance: 3.0,
             yaw: 0.8,
             pitch: -0.6,
             dragging: Dragging::None,
@@ -517,8 +678,9 @@ impl<Message> shader::Program<Message> for Scene {
                 };
 
                 if scroll_y.abs() > f32::EPSILON {
+                    // CAD-like dolly: move camera closer/farther.
                     let factor = 1.1_f32.powf(scroll_y);
-                    state.zoom = (state.zoom * factor).clamp(0.25, 8.0);
+                    state.distance = (state.distance / factor).clamp(0.1, 200.0);
                     return Some(shader::Action::request_redraw().and_capture());
                 }
             }
@@ -551,17 +713,35 @@ impl<Message> shader::Program<Message> for Scene {
                     Dragging::None => {}
                     Dragging::Pan => {
                         if let Some(last) = state.last_cursor {
-                            let dx = last.x - cursor_pos.x;
-                            let dy = last.y - cursor_pos.y;
+                            let dx = cursor_pos.x - last.x;
+                            let dy = cursor_pos.y - last.y;
 
                             if bounds.width > 1.0 && bounds.height > 1.0 {
+                                // Pixel delta -> NDC delta
                                 let dx_ndc = (dx * 2.0) / bounds.width;
                                 let dy_ndc = (-dy * 2.0) / bounds.height;
 
-                                // Keep panning speed consistent while zoomed in.
-                                let zoom = state.zoom.max(0.25);
-                                state.pan[0] += dx_ndc / zoom;
-                                state.pan[1] += dy_ndc / zoom;
+                                // NDC delta -> world delta at target depth
+                                let aspect = bounds.width / bounds.height;
+                                let fovy = 45.0_f32.to_radians();
+                                let dist = state.distance.clamp(0.1, 200.0);
+                                let half_h = (0.5 * fovy).tan() * dist;
+                                let half_w = half_h * aspect;
+
+                                // Camera basis
+                                let (sy, cy) = state.yaw.sin_cos();
+                                let (sp, cp) = state.pitch.sin_cos();
+                                let offset = [dist * cp * sy, dist * sp, dist * cp * cy];
+                                let forward = vec3_normalize(vec3_mul(offset, -1.0));
+                                let world_up = [0.0, 1.0, 0.0];
+                                let right = vec3_normalize(vec3_cross(world_up, forward));
+                                let up = vec3_cross(forward, right);
+
+                                let pan = vec3_add(
+                                    vec3_mul(right, dx_ndc * half_w),
+                                    vec3_mul(up, dy_ndc * half_h),
+                                );
+                                state.target = vec3_add(state.target, pan);
                             }
 
                             state.last_cursor = Some(cursor_pos);
@@ -573,12 +753,18 @@ impl<Message> shader::Program<Message> for Scene {
                     }
                     Dragging::Rotate => {
                         if let Some(last) = state.last_cursor {
-                            let dx =  last.x - cursor_pos.x;
-                            let dy = last.y - cursor_pos.y;
+                            let dx = cursor_pos.x - last.x;
+                            let dy = cursor_pos.y - last.y;
 
-                            let rot_speed = 0.01;
-                            state.yaw += dx * rot_speed;
-                            state.pitch += dy * rot_speed;
+                            // CAD-like orbit: scale by viewport size.
+                            let rot_speed = 2.5;
+                            if bounds.width > 1.0 && bounds.height > 1.0 {
+                                state.yaw += (dx / bounds.width) * rot_speed;
+                                state.pitch += (dy / bounds.height) * rot_speed;
+                            } else {
+                                state.yaw += dx * 0.01;
+                                state.pitch += dy * 0.01;
+                            }
 
                             let max_pitch = 1.55; // ~89deg to avoid flipping
                             state.pitch = state.pitch.clamp(-max_pitch, max_pitch);
@@ -600,8 +786,8 @@ impl<Message> shader::Program<Message> for Scene {
 
     fn draw(&self, state: &Self::State, _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
         Primitive {
-            pan: state.pan,
-            zoom: state.zoom,
+            target: state.target,
+            distance: state.distance,
             yaw: state.yaw,
             pitch: state.pitch,
         }
