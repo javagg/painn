@@ -159,7 +159,7 @@ pub enum CanvasEvent {
     ZoomAt { delta: f32, cursor: Point },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Draft {
     pub drawing: bool,
     pub start: Option<Point>,

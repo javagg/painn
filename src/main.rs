@@ -295,46 +295,54 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let toolbar = row![
-            text("工具"),
-            pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
-                .width(Length::Fixed(120.0)),
-            text("线宽"),
-            slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)
-                .width(Length::Fixed(180.0)),
-            text(format!("{:.1}", self.stroke_width)),
-            button(if self.show_grid { "网格：开" } else { "网格：关" })
-                .on_press(Message::ToggleGrid),
-            button("缩放重置").on_press(Message::ResetZoom),
-            button("撤销").on_press(Message::Undo),
-            button("删除选中")
-                .on_press_maybe(self.selected.map(|_| Message::DeleteSelected)),
-            button("清空").on_press(Message::Clear),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
+        let toolbar = || {
+            row![
+                text("工具"),
+                pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
+                    .width(Length::Fixed(120.0)),
+                text("线宽"),
+                slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)
+                    .width(Length::Fixed(180.0)),
+                text(format!("{:.1}", self.stroke_width)),
+                button(if self.show_grid { "网格：开" } else { "网格：关" })
+                    .on_press(Message::ToggleGrid),
+                button("缩放重置").on_press(Message::ResetZoom),
+                button("撤销").on_press(Message::Undo),
+                button("删除选中")
+                    .on_press_maybe(self.selected.map(|_| Message::DeleteSelected)),
+                button("清空").on_press(Message::Clear),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+        };
 
-        let stroke_row = row![
-            text("描边"),
-            button("黑").on_press(Message::StrokeColorChanged(Color::BLACK)),
-            button("红").on_press(Message::StrokeColorChanged(Color::from_rgb8(0xE6, 0x2E, 0x2E))),
-            button("绿").on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xE6, 0x6B))),
-            button("蓝").on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xB8, 0xE6))),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let stroke_row = || {
+            row![
+                text("描边"),
+                button("黑").on_press(Message::StrokeColorChanged(Color::BLACK)),
+                button("红")
+                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0xE6, 0x2E, 0x2E))),
+                button("绿")
+                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xE6, 0x6B))),
+                button("蓝")
+                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xB8, 0xE6))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        };
 
-        let fill_row = row![
-            text("填充"),
-            button("无")
-                .on_press(Message::FillColorChanged(None)),
-            button("浅蓝")
-                .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xB3, 0xD9, 0xFF)))),
-            button("浅红")
-                .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xFF, 0xB3, 0xB3)))),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let fill_row = || {
+            row![
+                text("填充"),
+                button("无").on_press(Message::FillColorChanged(None)),
+                button("浅蓝")
+                    .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xB3, 0xD9, 0xFF)))),
+                button("浅红")
+                    .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xFF, 0xB3, 0xB3)))),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        };
 
         let hint = match self.tool {
             Tool::Select => "选择：左键点击图形；可删除选中",
@@ -342,18 +350,20 @@ impl App {
             _ => "拖拽绘制：按下-移动-松开",
         };
 
-        let status = row![
-            text(format!("缩放：{:.0}%", self.zoom * 100.0)),
-            text("|"),
-            text(match self.cursor_pos {
-                Some(p) => format!("坐标：{:.1}, {:.1}", p.x, p.y),
-                None => "坐标：--".to_string(),
-            }),
-            text("|"),
-            text(hint),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
+        let status = || {
+            row![
+                text(format!("缩放：{:.0}%", self.zoom * 100.0)),
+                text("|"),
+                text(match self.cursor_pos {
+                    Some(p) => format!("坐标：{:.1}, {:.1}", p.x, p.y),
+                    None => "坐标：--".to_string(),
+                }),
+                text("|"),
+                text(hint),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+        };
 
         let board = drawing::canvas(
             &self.cache,
@@ -370,7 +380,21 @@ impl App {
             wrap_canvas_event,
         );
 
-        let draw_tab = column![toolbar, stroke_row, fill_row, board, status]
+        let vello_board = canvas::canvas(
+            self.tool,
+            self.shapes.as_slice(),
+            &self.draft,
+            self.stroke_width,
+            self.stroke_color,
+            self.fill_color,
+            self.show_grid,
+            self.zoom,
+            self.view_offset,
+            self.cursor_pos,
+            wrap_canvas_event,
+        );
+
+        let draw_tab = column![toolbar(), stroke_row(), fill_row(), board, status()]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
@@ -393,7 +417,8 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let vello_tab = column![canvas::widget::<Message>()]
+        let vello_tab = column![toolbar(), stroke_row(), fill_row(), vello_board, status()]
+            .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill);
