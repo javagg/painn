@@ -31,6 +31,7 @@ struct App {
     show_grid: bool,
     zoom: f32,
     view_offset: iced::Point,
+    cursor_pos: Option<iced::Point>,
     shapes: Vec<Shape>,
     selected: Option<usize>,
     draft: Draft,
@@ -47,6 +48,7 @@ impl App {
             show_grid: true,
             zoom: 1.0,
             view_offset: iced::Point::ORIGIN,
+            cursor_pos: None,
             shapes: Vec::new(),
             selected: None,
             draft: Draft::default(),
@@ -151,6 +153,7 @@ impl App {
         match event {
             CanvasEvent::PressedLeft(p) => match self.tool {
                 Tool::Select => {
+                    self.cursor_pos = Some(p);
                     self.selected = None;
                     for (i, shape) in self.shapes.iter().enumerate().rev() {
                         if shape.hit_test(p) {
@@ -161,6 +164,7 @@ impl App {
                     self.invalidate();
                 }
                 Tool::Line | Tool::Rect | Tool::Circle => {
+                    self.cursor_pos = Some(p);
                     self.selected = None;
                     self.draft.drawing = true;
                     self.draft.start = Some(p);
@@ -168,6 +172,7 @@ impl App {
                     self.invalidate();
                 }
                 Tool::Spline => {
+                    self.cursor_pos = Some(p);
                     self.selected = None;
                     self.draft.current = Some(p);
                     self.draft.spline_points.push(p);
@@ -175,14 +180,14 @@ impl App {
                 }
             },
             CanvasEvent::Moved(p) => {
+                self.cursor_pos = Some(p);
                 self.draft.current = Some(p);
-                if self.draft.drawing || self.tool == Tool::Spline {
-                    self.invalidate();
-                }
+                self.invalidate();
             }
             CanvasEvent::ReleasedLeft(p) => match self.tool {
                 Tool::Select => {}
                 Tool::Line | Tool::Rect | Tool::Circle => {
+                    self.cursor_pos = Some(p);
                     if !self.draft.drawing {
                         return;
                     }
@@ -207,7 +212,7 @@ impl App {
                     self.invalidate();
                 }
                 Tool::Spline => {
-                    let _ = p;
+                    self.cursor_pos = Some(p);
                 }
             },
             CanvasEvent::PressedRight(_p) => {
@@ -284,6 +289,11 @@ impl App {
         let status = row![
             text(format!("缩放：{:.0}%", self.zoom * 100.0)),
             text("|"),
+            text(match self.cursor_pos {
+                Some(p) => format!("坐标：{:.1}, {:.1}", p.x, p.y),
+                None => "坐标：--".to_string(),
+            }),
+            text("|"),
             text(hint),
         ]
         .spacing(10)
@@ -300,6 +310,7 @@ impl App {
             self.show_grid,
             self.zoom,
             self.view_offset,
+            self.cursor_pos,
             wrap_canvas_event,
         );
 

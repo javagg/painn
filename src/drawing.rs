@@ -151,6 +151,7 @@ pub fn canvas<'a, Message>(
     show_grid: bool,
     zoom: f32,
     view_offset: Point,
+    cursor_pos: Option<Point>,
     on_event: fn(CanvasEvent) -> Message,
 ) -> Element<'a, Message>
 where
@@ -167,6 +168,7 @@ where
         show_grid,
         zoom,
         view_offset,
+        cursor_pos,
         on_event,
     })
     .width(Length::Fill)
@@ -185,6 +187,7 @@ struct Board<'a, Message> {
     show_grid: bool,
     zoom: f32,
     view_offset: Point,
+    cursor_pos: Option<Point>,
     on_event: fn(CanvasEvent) -> Message,
 }
 
@@ -284,6 +287,10 @@ impl<Message> Program<Message> for Board<'_, Message> {
                     };
                     frame.fill_rectangle(rect.position(), rect.size(), Color::from_rgb8(0x2E, 0xB8, 0xE6));
                 }
+            }
+
+            if let Some(cursor) = self.cursor_pos {
+                draw_crosshair(frame, self.zoom, self.view_offset, cursor);
             }
         });
 
@@ -421,6 +428,33 @@ fn draw_grid(frame: &mut Frame) {
         y += spacing;
         index += 1;
     }
+}
+
+fn draw_crosshair(frame: &mut Frame, zoom: f32, view_offset: Point, cursor: Point) {
+    let size = frame.size();
+    let world_min = Point {
+        x: (-view_offset.x) / zoom,
+        y: (-view_offset.y) / zoom,
+    };
+    let world_max = Point {
+        x: (size.width - view_offset.x) / zoom,
+        y: (size.height - view_offset.y) / zoom,
+    };
+
+    let stroke = Stroke {
+        width: 1.0,
+        style: canvas::Style::Solid(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.35)),
+        ..Stroke::default()
+    };
+
+    frame.stroke(
+        &Path::line(Point { x: world_min.x, y: cursor.y }, Point { x: world_max.x, y: cursor.y }),
+        stroke,
+    );
+    frame.stroke(
+        &Path::line(Point { x: cursor.x, y: world_min.y }, Point { x: cursor.x, y: world_max.y }),
+        stroke,
+    );
 }
 
 fn preview_shape(
