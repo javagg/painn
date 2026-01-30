@@ -122,6 +122,33 @@ impl Shape {
             }
         }
     }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        match self {
+            Shape::Line { from, to, .. } => {
+                from.x += dx;
+                from.y += dy;
+                to.x += dx;
+                to.y += dy;
+            }
+            Shape::Rect { from, to, .. } => {
+                from.x += dx;
+                from.y += dy;
+                to.x += dx;
+                to.y += dy;
+            }
+            Shape::Circle { center, .. } => {
+                center.x += dx;
+                center.y += dy;
+            }
+            Shape::Spline { points, .. } => {
+                for p in points.iter_mut() {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub enum CanvasEvent {

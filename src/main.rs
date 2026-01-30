@@ -34,6 +34,8 @@ struct App {
     cursor_pos: Option<iced::Point>,
     shapes: Vec<Shape>,
     selected: Option<usize>,
+    dragging: bool,
+    drag_last: Option<iced::Point>,
     draft: Draft,
     cache: iced::widget::canvas::Cache,
 }
@@ -51,6 +53,8 @@ impl App {
             cursor_pos: None,
             shapes: Vec::new(),
             selected: None,
+            dragging: false,
+            drag_last: None,
             draft: Draft::default(),
             cache: iced::widget::canvas::Cache::default(),
         }
@@ -69,6 +73,8 @@ impl App {
             Message::ToolChanged(tool) => {
                 self.tool = tool;
                 self.reset_draft();
+                self.dragging = false;
+                self.drag_last = None;
                 self.invalidate();
             }
             Message::StrokeWidthChanged(w) => {
@@ -106,6 +112,8 @@ impl App {
             Message::Undo => {
                 self.shapes.pop();
                 self.selected = None;
+                self.dragging = false;
+                self.drag_last = None;
                 self.reset_draft();
                 self.invalidate();
             }
@@ -113,12 +121,16 @@ impl App {
                 if let Some(index) = self.selected {
                     self.shapes.remove(index);
                     self.selected = None;
+                    self.dragging = false;
+                    self.drag_last = None;
                     self.invalidate();
                 }
             }
             Message::Clear => {
                 self.shapes.clear();
                 self.selected = None;
+                self.dragging = false;
+                self.drag_last = None;
                 self.reset_draft();
                 self.invalidate();
             }
@@ -155,9 +167,13 @@ impl App {
                 Tool::Select => {
                     self.cursor_pos = Some(p);
                     self.selected = None;
+                    self.dragging = false;
+                    self.drag_last = None;
                     for (i, shape) in self.shapes.iter().enumerate().rev() {
                         if shape.hit_test(p) {
                             self.selected = Some(i);
+                            self.dragging = true;
+                            self.drag_last = Some(p);
                             break;
                         }
                     }
@@ -182,10 +198,24 @@ impl App {
             CanvasEvent::Moved(p) => {
                 self.cursor_pos = Some(p);
                 self.draft.current = Some(p);
+                if self.tool == Tool::Select && self.dragging {
+                    if let (Some(index), Some(last)) = (self.selected, self.drag_last) {
+                        let dx = p.x - last.x;
+                        let dy = p.y - last.y;
+                        if let Some(shape) = self.shapes.get_mut(index) {
+                            shape.translate(dx, dy);
+                        }
+                        self.drag_last = Some(p);
+                    }
+                }
                 self.invalidate();
             }
             CanvasEvent::ReleasedLeft(p) => match self.tool {
-                Tool::Select => {}
+                Tool::Select => {
+                    self.cursor_pos = Some(p);
+                    self.dragging = false;
+                    self.drag_last = None;
+                }
                 Tool::Line | Tool::Rect | Tool::Circle => {
                     self.cursor_pos = Some(p);
                     if !self.draft.drawing {
