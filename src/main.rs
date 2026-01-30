@@ -1,5 +1,6 @@
 mod drawing;
 mod scene;
+mod canvas;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use iced::widget::{button, column, pick_list, row, slider, text};
@@ -9,6 +10,7 @@ use iced::{Alignment, Color, Element, Length, Size, Task};
 enum Tab {
     Draw,
     Scene,
+    Vello,
     About,
 }
 
@@ -287,6 +289,7 @@ impl App {
         let tab_bar = row![
             tab_button("画图", Tab::Draw, self.active_tab),
             tab_button("渲染", Tab::Scene, self.active_tab),
+            tab_button("Vello", Tab::Vello, self.active_tab),
             tab_button("说明", Tab::About, self.active_tab),
         ]
         .spacing(8)
@@ -390,9 +393,15 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
+        let vello_tab = column![canvas::widget::<Message>()]
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
         let content = match self.active_tab {
             Tab::Draw => draw_tab,
             Tab::Scene => scene_tab,
+            Tab::Vello => vello_tab,
             Tab::About => about_tab,
         };
 
