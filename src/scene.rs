@@ -2,15 +2,18 @@ use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Element, Event, Length, Point, Rectangle};
 use iced::wgpu;
 
+use crate::cad;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
-    position: [f32; 2],
-    color: [f32; 3],
+    position: [f32; 3],
+    normal: [f32; 3],
 }
 
 impl Vertex {
-    const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
+    const ATTRS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -19,6 +22,51 @@ impl Vertex {
             attributes: &Self::ATTRS,
         }
     }
+}
+
+#[inline]
+fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    // Column-major matrices (WGSL convention).
+    // Element at row r, col c is m[c][r].
+    let mut out = [[0.0_f32; 4]; 4];
+    for c in 0..4 {
+        for r in 0..4 {
+            out[c][r] = (0..4).map(|k| a[k][r] * b[c][k]).sum();
+        }
+    }
+    out
+}
+
+#[inline]
+fn mat4_scale(sx: f32, sy: f32, sz: f32) -> [[f32; 4]; 4] {
+    [
+        [sx, 0.0, 0.0, 0.0],
+        [0.0, sy, 0.0, 0.0],
+        [0.0, 0.0, sz, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+#[inline]
+fn mat4_rot_x(angle: f32) -> [[f32; 4]; 4] {
+    let (s, c) = angle.sin_cos();
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, c, s, 0.0],
+        [0.0, -s, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+#[inline]
+fn mat4_rot_y(angle: f32) -> [[f32; 4]; 4] {
+    let (s, c) = angle.sin_cos();
+    [
+        [c, 0.0, -s, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [s, 0.0, c, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 #[repr(C)]
@@ -47,7 +95,8 @@ impl Uniforms {
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
-    vertex_count: u32,
+    indices: wgpu::Buffer,
+    index_count: u32,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -61,7 +110,7 @@ impl shader::Pipeline for Pipeline {
         use wgpu::util::DeviceExt;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene_triangle_shader"),
+            label: Some("scene_mesh_shader"),
             source: wgpu::ShaderSource::Wgsl(
                 r#"
 struct Uniforms {
@@ -72,26 +121,38 @@ struct Uniforms {
 var<uniform> uniforms: Uniforms;
 
 struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) color: vec3<f32>,
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) normal: vec3<f32>,
 };
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = uniforms.transform * vec4<f32>(in.position, 0.0, 1.0);
-    out.color = in.color;
+    out.position = uniforms.transform * vec4<f32>(in.position, 1.0);
+    let nmat = mat3x3<f32>(
+        uniforms.transform[0].xyz,
+        uniforms.transform[1].xyz,
+        uniforms.transform[2].xyz,
+    );
+    out.normal = normalize(nmat * in.normal);
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    let ambient = 0.18;
+    let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.8));
+    let ndotl = max(dot(normalize(in.normal), light_dir), 0.0);
+
+    let base = vec3<f32>(0.88, 0.90, 0.96);
+    let color = base * (ambient + (1.0 - ambient) * ndotl);
+
+    return vec4<f32>(color, 1.0);
 }
 "#
                     .into(),
@@ -115,13 +176,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let initial_uniforms = Uniforms::from_pan_zoom([0.0, 0.0], 1.0);
         let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_triangle_uniforms"),
+            label: Some("scene_mesh_uniforms"),
             contents: bytemuck::bytes_of(&initial_uniforms),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scene_triangle_bind_group"),
+            label: Some("scene_mesh_bind_group"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -129,35 +190,174 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }],
         });
 
-        let vertices: [Vertex; 3] = [
-            Vertex {
-                position: [0.0, 0.6],
-                color: [1.0, 0.2, 0.2],
-            },
-            Vertex {
-                position: [-0.6, -0.6],
-                color: [0.2, 1.0, 0.2],
-            },
-            Vertex {
-                position: [0.6, -0.6],
-                color: [0.2, 0.4, 1.0],
-            },
+        let mesh = cad::load_obj();
+        let positions = mesh.positions();
+        let has_normals = !mesh.normals().is_empty();
+
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for p in positions {
+            min[0] = min[0].min(p.x);
+            min[1] = min[1].min(p.y);
+            min[2] = min[2].min(p.z);
+            max[0] = max[0].max(p.x);
+            max[1] = max[1].max(p.y);
+            max[2] = max[2].max(p.z);
+        }
+
+        let center = [
+            (min[0] + max[0]) * 0.5,
+            (min[1] + max[1]) * 0.5,
+            (min[2] + max[2]) * 0.5,
         ];
+        let extent = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        let max_extent = extent
+            .into_iter()
+            .fold(0.0_f64, |acc, v| acc.max(v))
+            .max(1.0e-9);
+        let scale = 1.8 / max_extent;
+
+        let vertices: Vec<Vertex> = positions
+            .iter()
+            .map(|p| Vertex {
+                position: [
+                    ((p.x - center[0]) * scale) as f32,
+                    ((p.y - center[1]) * scale) as f32,
+                    ((p.z - center[2]) * scale) as f32,
+                ],
+                normal: [0.0, 0.0, 1.0],
+            })
+            .collect();
+
+        // Build triangle indices (tri/quad/ngon fan) and compute smooth per-position normals.
+        let mut tri_indices: Vec<u32> = Vec::new();
+        tri_indices.reserve(mesh.tri_faces().len() * 3);
+
+        for tri in mesh.tri_faces() {
+            tri_indices.extend_from_slice(&[
+                tri[0].pos as u32,
+                tri[1].pos as u32,
+                tri[2].pos as u32,
+            ]);
+        }
+        for quad in mesh.quad_faces() {
+            let a = quad[0].pos as u32;
+            let b = quad[1].pos as u32;
+            let c = quad[2].pos as u32;
+            let d = quad[3].pos as u32;
+            tri_indices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+        for face in mesh.other_faces() {
+            if face.len() < 3 {
+                continue;
+            }
+            let a = face[0].pos as u32;
+            for i in 1..(face.len() - 1) {
+                let b = face[i].pos as u32;
+                let c = face[i + 1].pos as u32;
+                tri_indices.extend_from_slice(&[a, b, c]);
+            }
+        }
+
+        let mut normal_sums = vec![[0.0_f32; 3]; vertices.len()];
+        let mesh_normals = mesh.normals();
+
+        if has_normals {
+            // Prefer OBJ normals if present.
+            for tri in mesh.tri_faces() {
+                for v in tri.iter() {
+                    if let Some(nor) = v.nor {
+                        let n = mesh_normals[nor];
+                        normal_sums[v.pos][0] += n.x as f32;
+                        normal_sums[v.pos][1] += n.y as f32;
+                        normal_sums[v.pos][2] += n.z as f32;
+                    }
+                }
+            }
+            for quad in mesh.quad_faces() {
+                for v in quad.iter() {
+                    if let Some(nor) = v.nor {
+                        let n = mesh_normals[nor];
+                        normal_sums[v.pos][0] += n.x as f32;
+                        normal_sums[v.pos][1] += n.y as f32;
+                        normal_sums[v.pos][2] += n.z as f32;
+                    }
+                }
+            }
+            for face in mesh.other_faces() {
+                for v in face.iter() {
+                    if let Some(nor) = v.nor {
+                        let n = mesh_normals[nor];
+                        normal_sums[v.pos][0] += n.x as f32;
+                        normal_sums[v.pos][1] += n.y as f32;
+                        normal_sums[v.pos][2] += n.z as f32;
+                    }
+                }
+            }
+        } else {
+            // Fallback: compute smooth normals from triangle geometry.
+            for tri in tri_indices.chunks_exact(3) {
+                let ia = tri[0] as usize;
+                let ib = tri[1] as usize;
+                let ic = tri[2] as usize;
+
+                let a = vertices[ia].position;
+                let b = vertices[ib].position;
+                let c = vertices[ic].position;
+
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+
+                let n = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+
+                normal_sums[ia][0] += n[0];
+                normal_sums[ia][1] += n[1];
+                normal_sums[ia][2] += n[2];
+
+                normal_sums[ib][0] += n[0];
+                normal_sums[ib][1] += n[1];
+                normal_sums[ib][2] += n[2];
+
+                normal_sums[ic][0] += n[0];
+                normal_sums[ic][1] += n[1];
+                normal_sums[ic][2] += n[2];
+            }
+        }
+
+        let mut vertices = vertices;
+        for (v, ns) in vertices.iter_mut().zip(normal_sums.into_iter()) {
+            let len = (ns[0] * ns[0] + ns[1] * ns[1] + ns[2] * ns[2]).sqrt();
+            if len > 1.0e-9 {
+                v.normal = [ns[0] / len, ns[1] / len, ns[2] / len];
+            } else {
+                v.normal = [0.0, 0.0, 1.0];
+            }
+        }
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_triangle_vertices"),
+            label: Some("scene_mesh_vertices"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_mesh_indices"),
+            contents: bytemuck::cast_slice(&tri_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene_triangle_pipeline_layout"),
+            label: Some("scene_mesh_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene_triangle_pipeline"),
+            label: Some("scene_mesh_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -181,7 +381,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -193,7 +393,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         Self {
             pipeline,
             vertices: vertex_buffer,
-            vertex_count: vertices.len() as u32,
+            indices: index_buffer,
+            index_count: tri_indices.len() as u32,
             uniforms,
             bind_group,
         }
@@ -204,6 +405,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 pub struct Primitive {
     pan: [f32; 2],
     zoom: f32,
+    yaw: f32,
+    pitch: f32,
 }
 
 impl shader::Primitive for Primitive {
@@ -214,10 +417,23 @@ impl shader::Primitive for Primitive {
         pipeline: &mut Self::Pipeline,
         _device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &Rectangle,
+        bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        let uniforms = Uniforms::from_pan_zoom(self.pan, self.zoom);
+        let pan_zoom = Uniforms::from_pan_zoom(self.pan, self.zoom).transform;
+
+        let aspect = if bounds.height > 1.0 {
+            (bounds.width / bounds.height).max(1.0e-6)
+        } else {
+            1.0
+        };
+
+        // Keep the model's aspect consistent with the view.
+        let aspect_fix = mat4_scale(1.0 / aspect, 1.0, 1.0);
+        let model = mat4_mul(mat4_rot_y(self.yaw), mat4_rot_x(self.pitch));
+
+        let transform = mat4_mul(pan_zoom, mat4_mul(aspect_fix, model));
+        let uniforms = Uniforms { transform };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
     }
 
@@ -229,7 +445,8 @@ impl shader::Primitive for Primitive {
         render_pass.set_pipeline(&pipeline.pipeline);
         render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
         render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
-        render_pass.draw(0..pipeline.vertex_count, 0..1);
+        render_pass.set_index_buffer(pipeline.indices.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
         true
     }
 }
@@ -241,8 +458,17 @@ pub struct Scene;
 pub struct SceneState {
     zoom: f32,
     pan: [f32; 2],
-    panning: bool,
+    yaw: f32,
+    pitch: f32,
+    dragging: Dragging,
     last_cursor: Option<Point>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dragging {
+    None,
+    Pan,
+    Rotate,
 }
 
 impl Default for SceneState {
@@ -250,7 +476,9 @@ impl Default for SceneState {
         Self {
             zoom: 1.0,
             pan: [0.0, 0.0],
-            panning: false,
+            yaw: 0.8,
+            pitch: -0.6,
+            dragging: Dragging::None,
             last_cursor: None,
         }
     }
@@ -268,9 +496,12 @@ impl<Message> shader::Program<Message> for Scene {
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
         let Some(cursor_pos) = cursor.position_in(bounds) else {
-            if matches!(event, Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)))
-            {
-                state.panning = false;
+            if matches!(
+                event,
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right))
+                    | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+            ) {
+                state.dragging = Dragging::None;
                 state.last_cursor = None;
                 return Some(shader::Action::request_redraw().and_capture());
             }
@@ -291,37 +522,73 @@ impl<Message> shader::Program<Message> for Scene {
                     return Some(shader::Action::request_redraw().and_capture());
                 }
             }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.dragging = Dragging::Rotate;
+                state.last_cursor = Some(cursor_pos);
+                return Some(shader::Action::request_redraw().and_capture());
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if state.dragging == Dragging::Rotate {
+                    state.dragging = Dragging::None;
+                    state.last_cursor = None;
+                    return Some(shader::Action::request_redraw().and_capture());
+                }
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                state.panning = true;
+                state.dragging = Dragging::Pan;
                 state.last_cursor = Some(cursor_pos);
                 return Some(shader::Action::request_redraw().and_capture());
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
-                state.panning = false;
-                state.last_cursor = None;
-                return Some(shader::Action::request_redraw().and_capture());
+                if state.dragging == Dragging::Pan {
+                    state.dragging = Dragging::None;
+                    state.last_cursor = None;
+                    return Some(shader::Action::request_redraw().and_capture());
+                }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                if state.panning {
-                    if let Some(last) = state.last_cursor {
-                        let dx = cursor_pos.x - last.x;
-                        let dy = cursor_pos.y - last.y;
+                match state.dragging {
+                    Dragging::None => {}
+                    Dragging::Pan => {
+                        if let Some(last) = state.last_cursor {
+                            let dx = last.x - cursor_pos.x;
+                            let dy = last.y - cursor_pos.y;
 
-                        if bounds.width > 1.0 && bounds.height > 1.0 {
-                            let dx_ndc = (dx * 2.0) / bounds.width;
-                            let dy_ndc = (-dy * 2.0) / bounds.height;
+                            if bounds.width > 1.0 && bounds.height > 1.0 {
+                                let dx_ndc = (dx * 2.0) / bounds.width;
+                                let dy_ndc = (-dy * 2.0) / bounds.height;
 
-                            // Keep panning speed consistent while zoomed in.
-                            let zoom = state.zoom.max(0.25);
-                            state.pan[0] += dx_ndc / zoom;
-                            state.pan[1] += dy_ndc / zoom;
+                                // Keep panning speed consistent while zoomed in.
+                                let zoom = state.zoom.max(0.25);
+                                state.pan[0] += dx_ndc / zoom;
+                                state.pan[1] += dy_ndc / zoom;
+                            }
+
+                            state.last_cursor = Some(cursor_pos);
+                            return Some(shader::Action::request_redraw().and_capture());
+                        } else {
+                            state.last_cursor = Some(cursor_pos);
+                            return Some(shader::Action::request_redraw().and_capture());
                         }
+                    }
+                    Dragging::Rotate => {
+                        if let Some(last) = state.last_cursor {
+                            let dx =  last.x - cursor_pos.x;
+                            let dy = last.y - cursor_pos.y;
 
-                        state.last_cursor = Some(cursor_pos);
-                        return Some(shader::Action::request_redraw().and_capture());
-                    } else {
-                        state.last_cursor = Some(cursor_pos);
-                        return Some(shader::Action::request_redraw().and_capture());
+                            let rot_speed = 0.01;
+                            state.yaw += dx * rot_speed;
+                            state.pitch += dy * rot_speed;
+
+                            let max_pitch = 1.55; // ~89deg to avoid flipping
+                            state.pitch = state.pitch.clamp(-max_pitch, max_pitch);
+
+                            state.last_cursor = Some(cursor_pos);
+                            return Some(shader::Action::request_redraw().and_capture());
+                        } else {
+                            state.last_cursor = Some(cursor_pos);
+                            return Some(shader::Action::request_redraw().and_capture());
+                        }
                     }
                 }
             }
@@ -335,6 +602,8 @@ impl<Message> shader::Program<Message> for Scene {
         Primitive {
             pan: state.pan,
             zoom: state.zoom,
+            yaw: state.yaw,
+            pitch: state.pitch,
         }
     }
 
@@ -344,7 +613,7 @@ impl<Message> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if cursor.position_in(bounds).is_some() && state.panning {
+        if cursor.position_in(bounds).is_some() && state.dragging != Dragging::None {
             mouse::Interaction::Grabbing
         } else if cursor.position_in(bounds).is_some() {
             mouse::Interaction::Grab

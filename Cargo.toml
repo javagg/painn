@@ -11,3 +11,7 @@ bytemuck = { version = "1", features = ["derive"] }
 vello = "0.7.0"
 i_overlay = "4.2.2"
 i_float = "1.16.0"
+truck-modeling = "0.6.0"
+truck-topology = "0.6.0"
+truck-polymesh = "0.6.0"
+truck-shapeops = "0.4.0"

@@ -1,6 +1,7 @@
 mod drawing;
 mod scene;
 mod canvas;
+mod cad;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use iced::widget::{button, column, pick_list, row, slider, text};
