@@ -2114,6 +2114,7 @@ dependencies = [
 name = "pain"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "iced",
  "iced_wgpu",
  "iced_widget",

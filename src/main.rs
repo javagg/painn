@@ -1,11 +1,20 @@
 mod drawing;
+mod scene;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Draw,
+    Scene,
+    About,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
+    TabChanged(Tab),
     ToolChanged(Tool),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
@@ -24,6 +33,7 @@ fn wrap_canvas_event(e: CanvasEvent) -> Message {
 
 #[derive(Debug)]
 struct App {
+    active_tab: Tab,
     tool: Tool,
     stroke_width: f32,
     stroke_color: Color,
@@ -43,6 +53,7 @@ struct App {
 impl App {
     fn new() -> Self {
         Self {
+            active_tab: Tab::Draw,
             tool: Tool::Line,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
@@ -70,6 +81,10 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::TabChanged(tab) => {
+                self.active_tab = tab;
+                self.invalidate();
+            }
             Message::ToolChanged(tool) => {
                 self.tool = tool;
                 self.reset_draft();
@@ -269,6 +284,14 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let tab_bar = row![
+            tab_button("画图", Tab::Draw, self.active_tab),
+            tab_button("渲染", Tab::Scene, self.active_tab),
+            tab_button("说明", Tab::About, self.active_tab),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
         let toolbar = row![
             text("工具"),
             pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
@@ -344,12 +367,49 @@ impl App {
             wrap_canvas_event,
         );
 
-        column![toolbar, stroke_row, fill_row, board, status]
+        let draw_tab = column![toolbar, stroke_row, fill_row, board, status]
+            .spacing(10)
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let about_tab = column![
+            text("操作提示"),
+            text("- 选择：左键点击图形，可拖拽移动"),
+            text("- 线/矩形/圆：拖拽绘制"),
+            text("- 样条：左键加点，右键结束"),
+            text("- 滚轮缩放，按钮可重置"),
+        ]
+        .spacing(6)
+        .padding(12)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        let scene_tab = column![scene::widget::<Message>()]
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        let content = match self.active_tab {
+            Tab::Draw => draw_tab,
+            Tab::Scene => scene_tab,
+            Tab::About => about_tab,
+        };
+
+        column![tab_bar, content]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+}
+
+fn tab_button(label: &str, tab: Tab, active: Tab) -> iced::widget::Button<'_, Message> {
+    if tab == active {
+        button(text(format!("● {label}"))).on_press_maybe(None)
+    } else {
+        button(text(label)).on_press(Message::TabChanged(tab))
     }
 }
 
