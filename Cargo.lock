@@ -2539,6 +2539,7 @@ dependencies = [
  "iced",
  "iced_wgpu",
  "iced_widget",
+ "truck-meshalgo",
  "truck-modeling",
  "truck-polymesh",
  "truck-shapeops",
