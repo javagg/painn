@@ -4,7 +4,7 @@ mod canvas;
 mod cad;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
-use scene::{GridPlane, SceneTool};
+use scene::{CameraMode, GridPlane, SceneTool};
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
@@ -49,7 +49,6 @@ impl std::fmt::Display for BooleanMode {
 enum Tab {
     Draw,
     Scene,
-    About,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +61,10 @@ enum Message {
     SceneGridExtentChanged(f32),
     SceneGridStepChanged(f32),
     SceneToolChanged(SceneTool),
+    SceneCameraModeChanged(CameraMode),
+    SceneAxesToggle,
+    SceneAxesSizeChanged(f32),
+    SceneAxesMarginChanged(f32),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
@@ -87,6 +90,10 @@ struct App {
     scene_grid_extent: f32,
     scene_grid_step: f32,
     scene_tool: SceneTool,
+    scene_camera_mode: CameraMode,
+    scene_axes_enabled: bool,
+    scene_axes_size: f32,
+    scene_axes_margin: f32,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -104,7 +111,7 @@ struct App {
 impl App {
     fn new() -> Self {
         Self {
-            active_tab: Tab::Draw,
+            active_tab: Tab::Scene,
             tool: Tool::Line,
             mode: BooleanMode::Add,
             scene_show_grid: true,
@@ -112,6 +119,10 @@ impl App {
             scene_grid_extent: 2.5,
             scene_grid_step: 0.25,
             scene_tool: SceneTool::Select,
+            scene_camera_mode: CameraMode::Orthographic,
+            scene_axes_enabled: true,
+            scene_axes_size: 100.0,
+            scene_axes_margin: 8.0,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -170,6 +181,22 @@ impl App {
             }
             Message::SceneToolChanged(tool) => {
                 self.scene_tool = tool;
+                self.invalidate();
+            }
+            Message::SceneCameraModeChanged(mode) => {
+                self.scene_camera_mode = mode;
+                self.invalidate();
+            }
+            Message::SceneAxesToggle => {
+                self.scene_axes_enabled = !self.scene_axes_enabled;
+                self.invalidate();
+            }
+            Message::SceneAxesSizeChanged(v) => {
+                self.scene_axes_size = v.clamp(24.0, 240.0);
+                self.invalidate();
+            }
+            Message::SceneAxesMarginChanged(v) => {
+                self.scene_axes_margin = v.clamp(0.0, 64.0);
                 self.invalidate();
             }
             Message::StrokeWidthChanged(w) => {
@@ -569,9 +596,8 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let tab_bar = row![
-            tab_button("Draw", Tab::Draw, self.active_tab),
             tab_button("Render", Tab::Scene, self.active_tab),
-            tab_button("About", Tab::About, self.active_tab),
+            tab_button("Draw", Tab::Draw, self.active_tab),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -670,19 +696,6 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let about_tab = column![
-            text("Tips"),
-            text("- Select: left click a shape, drag to move"),
-            text("- Line/Rectangle/Circle: drag to draw"),
-            text("- Spline: left click to add points, right click to finish"),
-            text("- Polygon: left click to add points, right click to finish"),
-            text("- Mouse wheel zoom; use Reset button"),
-        ]
-        .spacing(6)
-        .padding(12)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
         let scene_controls = column![
             row![
                 button(if self.scene_show_grid { "Grid: On" } else { "Grid: Off" })
@@ -710,6 +723,31 @@ impl App {
             .spacing(10)
             .align_y(Alignment::Center),
             row![
+                text("Camera"),
+                pick_list(
+                    CameraMode::ALL.as_slice(),
+                    Some(self.scene_camera_mode),
+                    Message::SceneCameraModeChanged,
+                )
+                .width(Length::Fixed(160.0)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            row![
+                button(if self.scene_axes_enabled { "Axes: On" } else { "Axes: Off" })
+                    .on_press(Message::SceneAxesToggle),
+                text("Size"),
+                slider(24.0..=240.0, self.scene_axes_size, Message::SceneAxesSizeChanged)
+                    .width(Length::Fixed(200.0)),
+                text(format!("{:.0}", self.scene_axes_size)),
+                text("Margin"),
+                slider(0.0..=64.0, self.scene_axes_margin, Message::SceneAxesMarginChanged)
+                    .width(Length::Fixed(160.0)),
+                text(format!("{:.0}", self.scene_axes_margin)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            row![
                 text("Range"),
                 slider(0.5..=10.0, self.scene_grid_extent, Message::SceneGridExtentChanged)
                     .width(Length::Fixed(200.0)),
@@ -730,6 +768,10 @@ impl App {
             self.scene_grid_extent,
             self.scene_grid_step,
             self.scene_tool,
+            self.scene_camera_mode,
+            self.scene_axes_enabled,
+            self.scene_axes_size,
+            self.scene_axes_margin,
         );
 
         let scene_tab = column![scene_controls, scene_view]
@@ -741,7 +783,6 @@ impl App {
         let content = match self.active_tab {
             Tab::Draw => draw_tab,
             Tab::Scene => scene_tab,
-            Tab::About => about_tab,
         };
 
         column![tab_bar, content]

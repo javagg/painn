@@ -45,6 +45,26 @@ impl GridVertex {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AxesVertex {
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
+impl AxesVertex {
+    const ATTRS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<AxesVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRS,
+        }
+    }
+}
+
 #[inline]
 fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     let mut out = [[0.0_f32; 4]; 4];
@@ -124,9 +144,22 @@ struct Camera {
     up: Vec3,
     aspect: f32,
     fovy: f32,
+    mode: CameraMode,
+    ortho_half_h: f32,
 }
 
-fn camera_from_state(state: &SceneState, bounds: Rectangle) -> Camera {
+fn camera_from_state(state: &SceneState, bounds: Rectangle, mode: CameraMode) -> Camera {
+    camera_from_params(state.target, state.distance, state.yaw, state.pitch, bounds, mode)
+}
+
+fn camera_from_params(
+    target: Vec3,
+    distance: f32,
+    yaw: f32,
+    pitch: f32,
+    bounds: Rectangle,
+    mode: CameraMode,
+) -> Camera {
     let aspect = if bounds.height > 1.0 {
         bounds.width / bounds.height
     } else {
@@ -134,15 +167,19 @@ fn camera_from_state(state: &SceneState, bounds: Rectangle) -> Camera {
     };
 
     let fovy = 45.0_f32.to_radians();
-    let distance = state.distance.clamp(0.1, 200.0);
-    let (sy, cy) = state.yaw.sin_cos();
-    let (sp, cp) = state.pitch.sin_cos();
+    let distance = distance.clamp(0.1, 200.0);
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
     let offset = [distance * cp * sy, distance * sp, distance * cp * cy];
-    let eye = vec3_add(state.target, offset);
-    let forward = vec3_normalize(vec3_sub(state.target, eye));
+    let eye = vec3_add(target, offset);
+    let forward = vec3_normalize(vec3_sub(target, eye));
     let world_up = [0.0, 1.0, 0.0];
-    let right = vec3_normalize(vec3_cross(world_up, forward));
-    let up = vec3_cross(forward, right);
+    let right = vec3_normalize(vec3_cross(forward, world_up));
+    let up = vec3_cross(right, forward);
+    let ortho_half_h = match mode {
+        CameraMode::Perspective => (0.5 * fovy).tan() * distance,
+        CameraMode::Orthographic => distance.max(0.1),
+    };
 
     Camera {
         eye,
@@ -151,6 +188,8 @@ fn camera_from_state(state: &SceneState, bounds: Rectangle) -> Camera {
         up,
         aspect,
         fovy,
+        mode,
+        ortho_half_h,
     }
 }
 
@@ -162,18 +201,34 @@ fn ray_from_cursor(cursor: Point, bounds: Rectangle, camera: &Camera) -> Option<
     let x_ndc = (cursor.x / bounds.width) * 2.0 - 1.0;
     let y_ndc = 1.0 - (cursor.y / bounds.height) * 2.0;
 
-    let half_h = (0.5 * camera.fovy).tan();
-    let half_w = half_h * camera.aspect;
+    match camera.mode {
+        CameraMode::Perspective => {
+            let half_h = (0.5 * camera.fovy).tan();
+            let half_w = half_h * camera.aspect;
 
-    let dir = vec3_normalize(vec3_add(
-        camera.forward,
-        vec3_add(
-            vec3_mul(camera.right, x_ndc * half_w),
-            vec3_mul(camera.up, y_ndc * half_h),
-        ),
-    ));
+            let dir = vec3_normalize(vec3_add(
+                camera.forward,
+                vec3_add(
+                    vec3_mul(camera.right, x_ndc * half_w),
+                    vec3_mul(camera.up, y_ndc * half_h),
+                ),
+            ));
 
-    Some((camera.eye, dir))
+            Some((camera.eye, dir))
+        }
+        CameraMode::Orthographic => {
+            let half_h = camera.ortho_half_h;
+            let half_w = half_h * camera.aspect;
+            let origin = vec3_add(
+                camera.eye,
+                vec3_add(
+                    vec3_mul(camera.right, x_ndc * half_w),
+                    vec3_mul(camera.up, y_ndc * half_h),
+                ),
+            );
+            Some((origin, camera.forward))
+        }
+    }
 }
 
 fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Option<Vec3> {
@@ -229,7 +284,14 @@ fn pick_entity(
     entities: &[SceneEntity],
 ) -> Option<u64> {
     let view = mat4_look_at_rh(camera.eye, vec3_add(camera.eye, camera.forward), [0.0, 1.0, 0.0]);
-    let proj = mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0);
+    let proj = match camera.mode {
+        CameraMode::Perspective => mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0),
+        CameraMode::Orthographic => {
+            let half_h = camera.ortho_half_h;
+            let half_w = half_h * camera.aspect;
+            mat4_orthographic(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+        }
+    };
     let mvp = mat4_mul(proj, view);
 
     let mut best: Option<(u64, f32)> = None;
@@ -242,9 +304,16 @@ fn pick_entity(
         let dy = screen.y - cursor.y;
         let dist2 = dx * dx + dy * dy;
 
-        let to_eye = vec3_sub(entity.position, camera.eye);
-        let dist = vec3_dot(to_eye, to_eye).sqrt().max(1.0e-6);
-        let half_h = (0.5 * camera.fovy).tan() * dist;
+        let (dist, half_h) = match camera.mode {
+            CameraMode::Perspective => {
+                let to_eye = vec3_sub(entity.position, camera.eye);
+                let dist = vec3_dot(to_eye, to_eye).sqrt().max(1.0e-6);
+                let half_h = (0.5 * camera.fovy).tan() * dist;
+                (dist, half_h)
+            }
+            CameraMode::Orthographic => (camera.ortho_half_h, camera.ortho_half_h),
+        };
+
         let pixels_per_world = bounds.height / (2.0 * half_h);
         let radius_px = (entity_radius(entity) * pixels_per_world).max(10.0);
 
@@ -431,6 +500,34 @@ fn mat4_perspective(aspect: f32, fovy_radians: f32, z_near: f32, z_far: f32) -> 
     ]
 }
 
+fn mat4_orthographic(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    z_near: f32,
+    z_far: f32,
+) -> [[f32; 4]; 4] {
+    let rml = right - left;
+    let tmb = top - bottom;
+    let fmn = z_far - z_near;
+
+    if rml.abs() <= 1.0e-6 || tmb.abs() <= 1.0e-6 || fmn.abs() <= 1.0e-6 {
+        return mat4_identity();
+    }
+
+    let tx = -(right + left) / rml;
+    let ty = -(top + bottom) / tmb;
+    let tz = -z_near / fmn;
+
+    [
+        [2.0 / rml, 0.0, 0.0, 0.0],
+        [0.0, 2.0 / tmb, 0.0, 0.0],
+        [0.0, 0.0, -1.0 / fmn, 0.0],
+        [tx, ty, tz, 1.0],
+    ]
+}
+
 #[inline]
 fn mat4_look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> [[f32; 4]; 4] {
     let f = vec3_normalize(vec3_sub(target, eye));
@@ -541,6 +638,29 @@ impl std::fmt::Display for GridPlane {
 impl Default for GridPlane {
     fn default() -> Self {
         GridPlane::XZ
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraMode {
+    Perspective,
+    Orthographic,
+}
+
+impl CameraMode {
+    pub const ALL: [CameraMode; 2] = [CameraMode::Orthographic, CameraMode::Perspective,];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CameraMode::Orthographic => "Orthographic",
+            CameraMode::Perspective => "Perspective",
+        }
+    }
+}
+
+impl std::fmt::Display for CameraMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 
@@ -656,6 +776,10 @@ pub struct Pipeline {
     depth: wgpu::TextureView,
     depth_size: (u32, u32),
     last_bounds: (f32, f32, f32, f32),
+    // Axes overlay
+    axes_pipeline: wgpu::RenderPipeline,
+    axes_vertices: wgpu::Buffer,
+    axes_vertex_count: u32,
 }
 
 impl shader::Pipeline for Pipeline {
@@ -1188,6 +1312,84 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        // Axes overlay pipeline (no uniforms, colored lines in clip space)
+        let axes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_axes_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
+"#
+                    .into(),
+            ),
+        });
+
+        let axes_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene_axes_pipeline_layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        let axes_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_axes_pipeline"),
+            layout: Some(&axes_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &axes_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[AxesVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &axes_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_depth"),
             size: wgpu::Extent3d {
@@ -1243,6 +1445,14 @@ fn fs_main() -> @location(0) vec4<f32> {
             depth,
             depth_size: (1, 1),
             last_bounds: (0.0, 0.0, 1.0, 1.0),
+            axes_pipeline,
+            axes_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_axes_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            axes_vertex_count: 0,
         }
     }
 }
@@ -1253,6 +1463,7 @@ pub struct Primitive {
     distance: f32,
     yaw: f32,
     pitch: f32,
+    camera_mode: CameraMode,
     show_grid: bool,
     grid_plane: GridPlane,
     grid_extent: f32,
@@ -1262,6 +1473,9 @@ pub struct Primitive {
     preview_line: Option<(Vec3, Vec3)>,
     preview_version: u64,
     selected: Option<u64>,
+    axes_enabled: bool,
+    axes_size: f32,
+    axes_margin: f32,
 }
 
 impl shader::Primitive for Primitive {
@@ -1308,26 +1522,30 @@ impl shader::Primitive for Primitive {
             (bounds.height * scale).max(1.0),
         );
 
-        let aspect = if bounds.height > 1.0 {
-            bounds.width / bounds.height
-        } else {
-            1.0
-        };
-
         // CAD-like orbit camera around a target point.
-        let fovy = 45.0_f32.to_radians();
-        let z_near = 0.02;
-        let z_far = 500.0;
-        let distance = self.distance.clamp(0.1, 200.0);
+        let camera = camera_from_params(
+            self.target,
+            self.distance,
+            self.yaw,
+            self.pitch,
+            *bounds,
+            self.camera_mode,
+        );
 
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let offset = [distance * cp * sy, distance * sp, distance * cp * cy];
-        let eye = vec3_add(self.target, offset);
-        let up = [0.0, 1.0, 0.0];
+        let view = mat4_look_at_rh(
+            camera.eye,
+            vec3_add(camera.eye, camera.forward),
+            [0.0, 1.0, 0.0],
+        );
 
-        let view = mat4_look_at_rh(eye, self.target, up);
-        let proj = mat4_perspective(aspect, fovy, z_near, z_far);
+        let proj = match camera.mode {
+            CameraMode::Perspective => mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0),
+            CameraMode::Orthographic => {
+                let half_h = camera.ortho_half_h;
+                let half_w = half_h * camera.aspect;
+                mat4_orthographic(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+            }
+        };
 
         let model = mat4_identity();
         let model_view = mat4_mul(view, model);
@@ -1335,6 +1553,73 @@ impl shader::Primitive for Primitive {
 
         let uniforms = Uniforms { model_view, mvp };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        // Build axes overlay vertices in clip space (-1..1) for a mini viewport.
+        // Project world axes onto camera's screen axes using camera.right/up.
+        let len = 0.9_f32;
+        let mut axes_vertices: Vec<AxesVertex> = Vec::with_capacity(32);
+
+        let mut add_axis_with_label = |v: Vec3, color: [f32; 3], ch: char| {
+            let x = vec3_dot(v, camera.right);
+            let y = vec3_dot(v, camera.up);
+            let ex = x * len;
+            let ey = y * len;
+
+            // Axis line from origin to endpoint in clip space
+            axes_vertices.push(AxesVertex { position: [0.0, 0.0, 0.0], color });
+            axes_vertices.push(AxesVertex { position: [ex, ey, 0.0], color });
+
+            // Label near endpoint, screen-aligned, small size in clip units
+            let mut nx = x;
+            let mut ny = y;
+            let mag = (nx * nx + ny * ny).sqrt();
+            if mag > 1.0e-4 { nx /= mag; ny /= mag; } else { nx = 1.0; ny = 0.0; }
+            let pad = 0.08_f32; // clip units (~8px at 100px viewport)
+            let px = ex + nx * pad;
+            let py = ey + ny * pad;
+            let s = 0.12_f32; // glyph half-size in clip units
+
+            match ch {
+                'X' => {
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
+                }
+                'Y' => {
+                    // upper-left to center, upper-right to center, center to bottom
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py - s, 0.0], color });
+                }
+                'Z' => {
+                    // top horizontal
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    // diagonal
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    // bottom horizontal
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
+                }
+                _ => {}
+            }
+        };
+
+        add_axis_with_label([1.0, 0.0, 0.0], [0.95, 0.3, 0.3], 'X'); // X - red
+        add_axis_with_label([0.0, 1.0, 0.0], [0.4, 0.9, 0.5], 'Y');   // Y - green
+        add_axis_with_label([0.0, 0.0, 1.0], [0.35, 0.6, 0.95], 'Z'); // Z - blue
+
+        pipeline.axes_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_axes_vertices"),
+            contents: bytemuck::cast_slice(&axes_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        pipeline.axes_vertex_count = axes_vertices.len() as u32;
 
         let grid_key = GridKey {
             enabled: self.show_grid,
@@ -1535,6 +1820,26 @@ impl shader::Primitive for Primitive {
         if pipeline.index_count > 0 {
             render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
         }
+
+        // Draw axes overlay at bottom-right corner
+        if self.axes_enabled && pipeline.axes_vertex_count > 0 {
+            let size = self.axes_size.max(24.0); // pixels
+            let margin = self.axes_margin.max(0.0);
+            let (bx, by, bw, bh) = pipeline.last_bounds;
+            let vx = (bx + bw - size - margin).max(bx);
+            let vy = (by + bh - size - margin).max(by);
+            let vw = size.min(bw);
+            let vh = size.min(bh);
+
+            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            // Keep scissor as widget clip
+            render_pass.set_pipeline(&pipeline.axes_pipeline);
+            render_pass.set_vertex_buffer(0, pipeline.axes_vertices.slice(..));
+            render_pass.draw(0..pipeline.axes_vertex_count, 0..1);
+
+            // Restore full viewport for any further draws (not strictly needed here)
+            render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
+        }
     }
 }
 
@@ -1545,6 +1850,10 @@ pub struct Scene {
     grid_extent: f32,
     grid_step: f32,
     tool: SceneTool,
+    camera_mode: CameraMode,
+    axes_enabled: bool,
+    axes_size: f32,
+    axes_margin: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -1647,7 +1956,7 @@ impl<Message> shader::Program<Message> for Scene {
             return None;
         };
 
-        let camera = camera_from_state(state, bounds);
+        let camera = camera_from_state(state, bounds, self.camera_mode);
 
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -1822,8 +2131,7 @@ impl<Message> shader::Program<Message> for Scene {
                                 let dx_ndc = (dx * 2.0) / bounds.width;
                                 let dy_ndc = (-dy * 2.0) / bounds.height;
 
-                                let dist = state.distance.clamp(0.1, 200.0);
-                                let half_h = (0.5 * camera.fovy).tan() * dist;
+                                let half_h = camera.ortho_half_h;
                                 let half_w = half_h * camera.aspect;
 
                                 let pan = vec3_add(
@@ -1878,6 +2186,7 @@ impl<Message> shader::Program<Message> for Scene {
             distance: state.distance,
             yaw: state.yaw,
             pitch: state.pitch,
+            camera_mode: self.camera_mode,
             show_grid: self.show_grid,
             grid_plane: self.grid_plane,
             grid_extent: self.grid_extent,
@@ -1887,6 +2196,9 @@ impl<Message> shader::Program<Message> for Scene {
             preview_line: state.preview_line,
             preview_version: state.preview_version,
             selected: state.selected,
+            axes_enabled: self.axes_enabled,
+            axes_size: self.axes_size,
+            axes_margin: self.axes_margin,
         }
     }
 
@@ -1912,6 +2224,10 @@ pub fn widget<'a, Message>(
     grid_extent: f32,
     grid_step: f32,
     tool: SceneTool,
+    camera_mode: CameraMode,
+    axes_enabled: bool,
+    axes_size: f32,
+    axes_margin: f32,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -1922,6 +2238,10 @@ where
         grid_extent,
         grid_step,
         tool,
+        camera_mode,
+        axes_enabled,
+        axes_size,
+        axes_margin,
     })
         .width(Length::Fill)
         .height(Length::Fill)
