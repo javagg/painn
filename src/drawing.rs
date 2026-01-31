@@ -25,12 +25,12 @@ impl Tool {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tool::Select => "选择",
-            Tool::Line => "线段",
-            Tool::Rect => "矩形",
-            Tool::Circle => "圆",
-            Tool::Spline => "样条",
-            Tool::Polygon => "多边形",
+            Tool::Select => "Select",
+            Tool::Line => "Line",
+            Tool::Rect => "Rectangle",
+            Tool::Circle => "Circle",
+            Tool::Spline => "Spline",
+            Tool::Polygon => "Polygon",
         }
     }
 }

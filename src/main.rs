@@ -562,32 +562,32 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let tab_bar = row![
-            tab_button("画图", Tab::Draw, self.active_tab),
-            tab_button("渲染", Tab::Scene, self.active_tab),
-            tab_button("说明", Tab::About, self.active_tab),
+            tab_button("Draw", Tab::Draw, self.active_tab),
+            tab_button("Render", Tab::Scene, self.active_tab),
+            tab_button("About", Tab::About, self.active_tab),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
 
         let toolbar = || {
             row![
-                text("工具"),
+                text("Tool"),
                 pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
                     .width(Length::Fixed(120.0)),
-                text("模式"),
+                text("Mode"),
                 pick_list(BooleanMode::ALL.as_slice(), Some(self.mode), Message::ModeChanged)
                     .width(Length::Fixed(120.0)),
-                text("线宽"),
+                text("Stroke"),
                 slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)
                     .width(Length::Fixed(180.0)),
                 text(format!("{:.1}", self.stroke_width)),
-                button(if self.show_grid { "网格：开" } else { "网格：关" })
+                button(if self.show_grid { "Grid: On" } else { "Grid: Off" })
                     .on_press(Message::ToggleGrid),
-                button("缩放重置").on_press(Message::ResetZoom),
-                button("撤销").on_press(Message::Undo),
-                button("删除选中")
+                button("Reset Zoom").on_press(Message::ResetZoom),
+                button("Undo").on_press(Message::Undo),
+                button("Delete Selected")
                     .on_press_maybe(self.selected.map(|_| Message::DeleteSelected)),
-                button("清空").on_press(Message::Clear),
+                button("Clear").on_press(Message::Clear),
             ]
             .spacing(10)
             .align_y(Alignment::Center)
@@ -595,13 +595,13 @@ impl App {
 
         let stroke_row = || {
             row![
-                text("描边"),
-                button("黑").on_press(Message::StrokeColorChanged(Color::BLACK)),
-                button("红")
+                text("Stroke"),
+                button("Black").on_press(Message::StrokeColorChanged(Color::BLACK)),
+                button("Red")
                     .on_press(Message::StrokeColorChanged(Color::from_rgb8(0xE6, 0x2E, 0x2E))),
-                button("绿")
+                button("Green")
                     .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xE6, 0x6B))),
-                button("蓝")
+                button("Blue")
                     .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xB8, 0xE6))),
             ]
             .spacing(8)
@@ -610,11 +610,11 @@ impl App {
 
         let fill_row = || {
             row![
-                text("填充"),
-                button("无").on_press(Message::FillColorChanged(None)),
-                button("浅蓝")
+                text("Fill"),
+                button("None").on_press(Message::FillColorChanged(None)),
+                button("Light Blue")
                     .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xB3, 0xD9, 0xFF)))),
-                button("浅红")
+                button("Light Red")
                     .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xFF, 0xB3, 0xB3)))),
             ]
             .spacing(8)
@@ -622,19 +622,19 @@ impl App {
         };
 
         let hint = match self.tool {
-            Tool::Select => "选择：左键点击图形；可删除选中",
-            Tool::Spline => "样条：左键加点，右键结束",
-            Tool::Polygon => "多边形：左键加点，右键闭合结束",
-            _ => "拖拽绘制：按下-移动-松开",
+            Tool::Select => "Select: left click a shape; delete selected",
+            Tool::Spline => "Spline: left click to add points, right click to finish",
+            Tool::Polygon => "Polygon: left click to add points, right click to close",
+            _ => "Drag to draw: press-move-release",
         };
 
         let status = || {
             row![
-                text(format!("缩放：{:.0}%", self.zoom * 100.0)),
+                text(format!("Zoom: {:.0}%", self.zoom * 100.0)),
                 text("|"),
                 text(match self.cursor_pos {
-                    Some(p) => format!("坐标：{:.1}, {:.1}", p.x, p.y),
-                    None => "坐标：--".to_string(),
+                    Some(p) => format!("Coords: {:.1}, {:.1}", p.x, p.y),
+                    None => "Coords: --".to_string(),
                 }),
                 text("|"),
                 text(hint),
@@ -664,12 +664,12 @@ impl App {
             .height(Length::Fill);
 
         let about_tab = column![
-            text("操作提示"),
-            text("- 选择：左键点击图形，可拖拽移动"),
-            text("- 线/矩形/圆：拖拽绘制"),
-            text("- 样条：左键加点，右键结束"),
-            text("- 多边形：左键加点，右键结束"),
-            text("- 滚轮缩放，按钮可重置"),
+            text("Tips"),
+            text("- Select: left click a shape, drag to move"),
+            text("- Line/Rectangle/Circle: drag to draw"),
+            text("- Spline: left click to add points, right click to finish"),
+            text("- Polygon: left click to add points, right click to finish"),
+            text("- Mouse wheel zoom; use Reset button"),
         ]
         .spacing(6)
         .padding(12)
@@ -678,9 +678,9 @@ impl App {
 
         let scene_controls = column![
             row![
-                button(if self.scene_show_grid { "网格：开" } else { "网格：关" })
+                button(if self.scene_show_grid { "Grid: On" } else { "Grid: Off" })
                     .on_press(Message::SceneGridToggle),
-                text("平面"),
+                text("Plane"),
                 pick_list(
                     GridPlane::ALL.as_slice(),
                     Some(self.scene_grid_plane),
@@ -691,11 +691,11 @@ impl App {
             .spacing(10)
             .align_y(Alignment::Center),
             row![
-                text("范围"),
+                text("Range"),
                 slider(0.5..=10.0, self.scene_grid_extent, Message::SceneGridExtentChanged)
                     .width(Length::Fixed(200.0)),
                 text(format!("{:.2}", self.scene_grid_extent)),
-                text("密度"),
+                text("Density"),
                 slider(0.05..=2.0, self.scene_grid_step, Message::SceneGridStepChanged)
                     .width(Length::Fixed(200.0)),
                 text(format!("{:.2}", self.scene_grid_step)),
