@@ -4,7 +4,7 @@ mod canvas;
 mod cad;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
-use scene::{CameraMode, GridPlane, SceneTool};
+use scene::{CameraMode, CameraPreset, GridPlane, SceneTool};
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
@@ -62,6 +62,8 @@ enum Message {
     SceneGridStepChanged(f32),
     SceneToolChanged(SceneTool),
     SceneCameraModeChanged(CameraMode),
+    SceneCameraPresetChanged(CameraPreset),
+    SceneCameraPresetCleared,
     SceneAxesToggle,
     SceneAxesSizeChanged(f32),
     SceneAxesMarginChanged(f32),
@@ -91,6 +93,7 @@ struct App {
     scene_grid_step: f32,
     scene_tool: SceneTool,
     scene_camera_mode: CameraMode,
+    scene_camera_preset: Option<CameraPreset>,
     scene_axes_enabled: bool,
     scene_axes_size: f32,
     scene_axes_margin: f32,
@@ -115,11 +118,12 @@ impl App {
             tool: Tool::Line,
             mode: BooleanMode::Add,
             scene_show_grid: true,
-            scene_grid_plane: GridPlane::XZ,
+            scene_grid_plane: GridPlane::XY,
             scene_grid_extent: 2.5,
             scene_grid_step: 0.25,
             scene_tool: SceneTool::Select,
             scene_camera_mode: CameraMode::Orthographic,
+            scene_camera_preset: Some(CameraPreset::Iso),
             scene_axes_enabled: true,
             scene_axes_size: 100.0,
             scene_axes_margin: 8.0,
@@ -185,6 +189,14 @@ impl App {
             }
             Message::SceneCameraModeChanged(mode) => {
                 self.scene_camera_mode = mode;
+                self.invalidate();
+            }
+            Message::SceneCameraPresetChanged(p) => {
+                self.scene_camera_preset = Some(p);
+                self.invalidate();
+            }
+            Message::SceneCameraPresetCleared => {
+                self.scene_camera_preset = None;
                 self.invalidate();
             }
             Message::SceneAxesToggle => {
@@ -730,6 +742,14 @@ impl App {
                     Message::SceneCameraModeChanged,
                 )
                 .width(Length::Fixed(160.0)),
+                text("Align"),
+                pick_list(
+                    CameraPreset::ALL.as_slice(),
+                    self.scene_camera_preset,
+                    Message::SceneCameraPresetChanged,
+                )
+                .width(Length::Fixed(160.0)),
+                button("Clear Align").on_press(Message::SceneCameraPresetCleared),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -769,6 +789,7 @@ impl App {
             self.scene_grid_step,
             self.scene_tool,
             self.scene_camera_mode,
+            self.scene_camera_preset,
             self.scene_axes_enabled,
             self.scene_axes_size,
             self.scene_axes_margin,

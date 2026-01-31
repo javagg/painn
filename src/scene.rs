@@ -642,6 +642,76 @@ impl Default for GridPlane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraPreset {
+    Top,
+    Bottom,
+    Front,
+    Back,
+    Left,
+    Right,
+    Iso,
+    IsoLeft,
+    IsoRight,
+}
+
+impl CameraPreset {
+    pub const ALL: [CameraPreset; 9] = [
+        CameraPreset::Top,
+        CameraPreset::Bottom,
+        CameraPreset::Front,
+        CameraPreset::Back,
+        CameraPreset::Left,
+        CameraPreset::Right,
+        CameraPreset::Iso,
+        CameraPreset::IsoLeft,
+        CameraPreset::IsoRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CameraPreset::Top => "Top",
+            CameraPreset::Bottom => "Bottom",
+            CameraPreset::Front => "Front",
+            CameraPreset::Back => "Back",
+            CameraPreset::Left => "Left",
+            CameraPreset::Right => "Right",
+            CameraPreset::Iso => "Isometric",
+            CameraPreset::IsoLeft => "Isometric Left",
+            CameraPreset::IsoRight => "Isometric Right",
+        }
+    }
+}
+
+impl std::fmt::Display for CameraPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+fn preset_angles(preset: CameraPreset) -> (f32, f32) {
+    match preset {
+        CameraPreset::Top => (0.0, 1.55),
+        CameraPreset::Bottom => (0.0, -1.55),
+        CameraPreset::Front => (0.0, 0.0),
+        CameraPreset::Back => (std::f32::consts::PI, 0.0),
+        CameraPreset::Left => (-std::f32::consts::FRAC_PI_2, 0.0),
+        CameraPreset::Right => (std::f32::consts::FRAC_PI_2, 0.0),
+        CameraPreset::Iso => (
+            std::f32::consts::FRAC_PI_4,
+            35.264_f32.to_radians(),
+        ),
+        CameraPreset::IsoLeft => (
+            -std::f32::consts::FRAC_PI_4,
+            35.264_f32.to_radians(),
+        ),
+        CameraPreset::IsoRight => (
+            std::f32::consts::FRAC_PI_4,
+            35.264_f32.to_radians(),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     Perspective,
     Orthographic,
@@ -1851,6 +1921,7 @@ pub struct Scene {
     grid_step: f32,
     tool: SceneTool,
     camera_mode: CameraMode,
+    camera_preset: Option<CameraPreset>,
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
@@ -1956,7 +2027,13 @@ impl<Message> shader::Program<Message> for Scene {
             return None;
         };
 
-        let camera = camera_from_state(state, bounds, self.camera_mode);
+        // Apply camera preset if present
+        let (yaw, pitch) = if let Some(p) = self.camera_preset {
+            preset_angles(p)
+        } else {
+            (state.yaw, state.pitch)
+        };
+        let camera = camera_from_params(state.target, state.distance, yaw, pitch, bounds, self.camera_mode);
 
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -2184,8 +2261,8 @@ impl<Message> shader::Program<Message> for Scene {
         Primitive {
             target: state.target,
             distance: state.distance,
-            yaw: state.yaw,
-            pitch: state.pitch,
+            yaw: if let Some(p) = self.camera_preset { preset_angles(p).0 } else { state.yaw },
+            pitch: if let Some(p) = self.camera_preset { preset_angles(p).1 } else { state.pitch },
             camera_mode: self.camera_mode,
             show_grid: self.show_grid,
             grid_plane: self.grid_plane,
@@ -2225,6 +2302,7 @@ pub fn widget<'a, Message>(
     grid_step: f32,
     tool: SceneTool,
     camera_mode: CameraMode,
+    camera_preset: Option<CameraPreset>,
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
@@ -2239,6 +2317,7 @@ where
         grid_step,
         tool,
         camera_mode,
+        camera_preset,
         axes_enabled,
         axes_size,
         axes_margin,
