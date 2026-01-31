@@ -239,7 +239,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }],
         });
 
-        let mesh = cad::load_obj();
+        let solid = cad::bottle(2.0, 1.2, 0.8);
+        let mesh = cad::to_mesh(&solid);
         let positions = mesh.positions();
         let has_normals = !mesh.normals().is_empty();
 
