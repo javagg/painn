@@ -15,6 +15,41 @@ pub fn to_mesh(solid: &Solid) -> PolygonMesh {
     mesh
 }
 
+pub fn box_solid(width: f64, height: f64, depth: f64) -> Solid {
+    let vertex: Vertex = builder::vertex(Point3::new(-width / 2.0, -height / 2.0, -depth / 2.0));
+    let edge: Edge = builder::tsweep(&vertex, Vector3::new(0.0, 0.0, depth));
+    let face: Face = builder::tsweep(&edge, Vector3::new(width, 0.0, 0.0));
+    builder::tsweep(&face, Vector3::new(0.0, height, 0.0))
+}
+
+pub fn sphere(radius: f64) -> Solid {
+    let v0 = builder::vertex(Point3::new(0.0, radius, 0.0));
+    let wire: Wire = builder::rsweep(&v0, Point3::origin(), Vector3::unit_x(), Rad(PI));
+    let shell = builder::cone(&wire, Vector3::unit_y(), Rad(7.0));
+    Solid::new(vec![shell])
+}
+
+pub fn cylinder_solid(height: f64, radius: f64) -> Solid {
+    let shell = cylinder(-height / 2.0, height, radius);
+    Solid::new(vec![shell])
+}
+
+pub fn cone_solid(height: f64, radius: f64) -> Solid {
+    let v0 = builder::vertex(Point3::new(0.0, height / 2.0, 0.0));
+    let v1 = builder::vertex(Point3::new(0.0, -height / 2.0, radius));
+    let v2 = builder::vertex(Point3::new(0.0, -height / 2.0, 0.0));
+    let wire: Wire = vec![builder::line(&v0, &v1), builder::line(&v1, &v2)].into();
+    let shell = builder::cone(&wire, Vector3::unit_y(), Rad(7.0));
+    Solid::new(vec![shell])
+}
+
+pub fn torus_solid(major: f64, minor: f64) -> Solid {
+    let v = builder::vertex(Point3::new(major, 0.0, minor));
+    let w = builder::rsweep(&v, Point3::new(major, 0.0, 0.0), Vector3::unit_y(), Rad(7.0));
+    let shell = builder::rsweep(&w, Point3::origin(), Vector3::unit_z(), Rad(7.0));
+    Solid::new(vec![shell])
+}
+
 /// Construct a cube
 pub fn cube() -> Solid {
     // put a vertex at the point (-1, 0, -1)

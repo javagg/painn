@@ -4,7 +4,7 @@ mod canvas;
 mod cad;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
-use scene::GridPlane;
+use scene::{GridPlane, SceneTool};
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
@@ -61,6 +61,7 @@ enum Message {
     SceneGridPlaneChanged(GridPlane),
     SceneGridExtentChanged(f32),
     SceneGridStepChanged(f32),
+    SceneToolChanged(SceneTool),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
@@ -85,6 +86,7 @@ struct App {
     scene_grid_plane: GridPlane,
     scene_grid_extent: f32,
     scene_grid_step: f32,
+    scene_tool: SceneTool,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -109,6 +111,7 @@ impl App {
             scene_grid_plane: GridPlane::XZ,
             scene_grid_extent: 2.5,
             scene_grid_step: 0.25,
+            scene_tool: SceneTool::Select,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -163,6 +166,10 @@ impl App {
             }
             Message::SceneGridStepChanged(value) => {
                 self.scene_grid_step = value.max(0.05);
+                self.invalidate();
+            }
+            Message::SceneToolChanged(tool) => {
+                self.scene_tool = tool;
                 self.invalidate();
             }
             Message::StrokeWidthChanged(w) => {
@@ -691,6 +698,18 @@ impl App {
             .spacing(10)
             .align_y(Alignment::Center),
             row![
+                text("Primitive"),
+                pick_list(
+                    SceneTool::ALL.as_slice(),
+                    Some(self.scene_tool),
+                    Message::SceneToolChanged,
+                )
+                .width(Length::Fixed(160.0)),
+                text("Create with left click + drag"),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            row![
                 text("Range"),
                 slider(0.5..=10.0, self.scene_grid_extent, Message::SceneGridExtentChanged)
                     .width(Length::Fixed(200.0)),
@@ -710,6 +729,7 @@ impl App {
             self.scene_grid_plane,
             self.scene_grid_extent,
             self.scene_grid_step,
+            self.scene_tool,
         );
 
         let scene_tab = column![scene_controls, scene_view]

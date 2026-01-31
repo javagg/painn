@@ -1,9 +1,11 @@
 use iced::widget::shader::{self, Viewport};
-use iced::{mouse, Element, Event, Length, Point, Rectangle};
+use iced::{keyboard, mouse, Element, Event, Length, Point, Rectangle};
 use iced::wgpu;
 use wgpu::util::DeviceExt;
 
 use crate::cad;
+use truck_polymesh::PolygonMesh;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -45,8 +47,6 @@ impl GridVertex {
 
 #[inline]
 fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    // Column-major matrices (WGSL convention).
-    // Element at row r, col c is m[c][r].
     let mut out = [[0.0_f32; 4]; 4];
     for c in 0..4 {
         for r in 0..4 {
@@ -64,6 +64,15 @@ fn mat4_identity() -> [[f32; 4]; 4] {
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
+}
+
+#[inline]
+fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0_f32; 4];
+    for r in 0..4 {
+        out[r] = m[0][r] * v[0] + m[1][r] * v[1] + m[2][r] * v[2] + m[3][r] * v[3];
+    }
+    out
 }
 
 type Vec3 = [f32; 3];
@@ -106,6 +115,305 @@ fn vec3_normalize(v: Vec3) -> Vec3 {
     } else {
         [0.0, 0.0, 0.0]
     }
+}
+
+struct Camera {
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    aspect: f32,
+    fovy: f32,
+}
+
+fn camera_from_state(state: &SceneState, bounds: Rectangle) -> Camera {
+    let aspect = if bounds.height > 1.0 {
+        bounds.width / bounds.height
+    } else {
+        1.0
+    };
+
+    let fovy = 45.0_f32.to_radians();
+    let distance = state.distance.clamp(0.1, 200.0);
+    let (sy, cy) = state.yaw.sin_cos();
+    let (sp, cp) = state.pitch.sin_cos();
+    let offset = [distance * cp * sy, distance * sp, distance * cp * cy];
+    let eye = vec3_add(state.target, offset);
+    let forward = vec3_normalize(vec3_sub(state.target, eye));
+    let world_up = [0.0, 1.0, 0.0];
+    let right = vec3_normalize(vec3_cross(world_up, forward));
+    let up = vec3_cross(forward, right);
+
+    Camera {
+        eye,
+        forward,
+        right,
+        up,
+        aspect,
+        fovy,
+    }
+}
+
+fn ray_from_cursor(cursor: Point, bounds: Rectangle, camera: &Camera) -> Option<(Vec3, Vec3)> {
+    if bounds.width <= 1.0 || bounds.height <= 1.0 {
+        return None;
+    }
+
+    let x_ndc = (cursor.x / bounds.width) * 2.0 - 1.0;
+    let y_ndc = 1.0 - (cursor.y / bounds.height) * 2.0;
+
+    let half_h = (0.5 * camera.fovy).tan();
+    let half_w = half_h * camera.aspect;
+
+    let dir = vec3_normalize(vec3_add(
+        camera.forward,
+        vec3_add(
+            vec3_mul(camera.right, x_ndc * half_w),
+            vec3_mul(camera.up, y_ndc * half_h),
+        ),
+    ));
+
+    Some((camera.eye, dir))
+}
+
+fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Option<Vec3> {
+    let (num, denom) = match plane {
+        GridPlane::XY => (-origin[2], dir[2]),
+        GridPlane::YZ => (-origin[0], dir[0]),
+        GridPlane::XZ => (-origin[1], dir[1]),
+    };
+
+    if denom.abs() <= 1.0e-6 {
+        return None;
+    }
+
+    let t = num / denom;
+    if t <= 0.0 {
+        return None;
+    }
+
+    Some(vec3_add(origin, vec3_mul(dir, t)))
+}
+
+fn entity_radius(entity: &SceneEntity) -> f32 {
+    match entity.kind {
+        SolidKind::Box => entity.size * 0.7,
+        SolidKind::Sphere => entity.size * 0.5,
+        SolidKind::Cylinder => entity.size * 0.6,
+        SolidKind::Cone => entity.size * 0.6,
+        SolidKind::Torus => entity.size * 0.8,
+    }
+}
+
+fn project_point(mvp: [[f32; 4]; 4], bounds: Rectangle, p: Vec3) -> Option<Point> {
+    let clip = mat4_mul_vec4(mvp, [p[0], p[1], p[2], 1.0]);
+    if clip[3].abs() <= 1.0e-6 {
+        return None;
+    }
+
+    let inv_w = 1.0 / clip[3];
+    let ndc = [clip[0] * inv_w, clip[1] * inv_w, clip[2] * inv_w];
+    if ndc[2] < -1.0 || ndc[2] > 1.0 {
+        return None;
+    }
+
+    let x = (ndc[0] * 0.5 + 0.5) * bounds.width;
+    let y = (1.0 - (ndc[1] * 0.5 + 0.5)) * bounds.height;
+    Some(Point { x, y })
+}
+
+fn pick_entity(
+    cursor: Point,
+    bounds: Rectangle,
+    camera: &Camera,
+    entities: &[SceneEntity],
+) -> Option<u64> {
+    let view = mat4_look_at_rh(camera.eye, vec3_add(camera.eye, camera.forward), [0.0, 1.0, 0.0]);
+    let proj = mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0);
+    let mvp = mat4_mul(proj, view);
+
+    let mut best: Option<(u64, f32)> = None;
+    for entity in entities {
+        let Some(screen) = project_point(mvp, bounds, entity.position) else {
+            continue;
+        };
+
+        let dx = screen.x - cursor.x;
+        let dy = screen.y - cursor.y;
+        let dist2 = dx * dx + dy * dy;
+
+        let to_eye = vec3_sub(entity.position, camera.eye);
+        let dist = vec3_dot(to_eye, to_eye).sqrt().max(1.0e-6);
+        let half_h = (0.5 * camera.fovy).tan() * dist;
+        let pixels_per_world = bounds.height / (2.0 * half_h);
+        let radius_px = (entity_radius(entity) * pixels_per_world).max(10.0);
+
+        if dist2 <= radius_px * radius_px {
+            let score = dist2 + dist * 0.01;
+            if best.map(|(_, b)| score < b).unwrap_or(true) {
+                best = Some((entity.id, score));
+            }
+        }
+    }
+
+    best.map(|(id, _)| id)
+}
+
+fn translate_mesh(mesh: &mut PolygonMesh, offset: Vec3) {
+    for p in mesh.positions_mut() {
+        p.x += offset[0] as f64;
+        p.y += offset[1] as f64;
+        p.z += offset[2] as f64;
+    }
+}
+
+fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
+    let size = entity.size as f64;
+    let solid = match entity.kind {
+        SolidKind::Box => cad::box_solid(size, size, size),
+        SolidKind::Sphere => cad::sphere(size * 0.5),
+        SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
+        SolidKind::Cone => cad::cone_solid(size, size * 0.4),
+        SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
+    };
+
+    let mut mesh = cad::to_mesh(&solid);
+    translate_mesh(&mut mesh, entity.position);
+    mesh
+}
+
+fn build_scene_mesh(entities: &[SceneEntity]) -> Option<PolygonMesh> {
+    let mut iter = entities.iter();
+    let Some(first) = iter.next() else {
+        return None;
+    };
+
+    let mut mesh = entity_to_mesh(first);
+    for entity in iter {
+        let other = entity_to_mesh(entity);
+        mesh.merge(other);
+    }
+    Some(mesh)
+}
+
+fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
+    let positions = mesh.positions();
+    let has_normals = !mesh.normals().is_empty();
+
+    let mut vertices: Vec<Vertex> = positions
+        .iter()
+        .map(|p| Vertex {
+            position: [p.x as f32, p.y as f32, p.z as f32],
+            normal: [0.0, 0.0, 1.0],
+        })
+        .collect();
+
+    let mut tri_indices: Vec<u32> = Vec::new();
+    tri_indices.reserve(mesh.tri_faces().len() * 3);
+
+    for tri in mesh.tri_faces() {
+        tri_indices.extend_from_slice(&[
+            tri[0].pos as u32,
+            tri[1].pos as u32,
+            tri[2].pos as u32,
+        ]);
+    }
+    for quad in mesh.quad_faces() {
+        let a = quad[0].pos as u32;
+        let b = quad[1].pos as u32;
+        let c = quad[2].pos as u32;
+        let d = quad[3].pos as u32;
+        tri_indices.extend_from_slice(&[a, b, c, a, c, d]);
+    }
+    for face in mesh.other_faces() {
+        if face.len() < 3 {
+            continue;
+        }
+        let a = face[0].pos as u32;
+        for i in 1..(face.len() - 1) {
+            let b = face[i].pos as u32;
+            let c = face[i + 1].pos as u32;
+            tri_indices.extend_from_slice(&[a, b, c]);
+        }
+    }
+
+    let mut normal_sums = vec![[0.0_f32; 3]; vertices.len()];
+    let mesh_normals = mesh.normals();
+
+    if has_normals {
+        for tri in mesh.tri_faces() {
+            for v in tri.iter() {
+                if let Some(nor) = v.nor {
+                    let n = mesh_normals[nor];
+                    normal_sums[v.pos][0] += n.x as f32;
+                    normal_sums[v.pos][1] += n.y as f32;
+                    normal_sums[v.pos][2] += n.z as f32;
+                }
+            }
+        }
+        for quad in mesh.quad_faces() {
+            for v in quad.iter() {
+                if let Some(nor) = v.nor {
+                    let n = mesh_normals[nor];
+                    normal_sums[v.pos][0] += n.x as f32;
+                    normal_sums[v.pos][1] += n.y as f32;
+                    normal_sums[v.pos][2] += n.z as f32;
+                }
+            }
+        }
+        for face in mesh.other_faces() {
+            for v in face.iter() {
+                if let Some(nor) = v.nor {
+                    let n = mesh_normals[nor];
+                    normal_sums[v.pos][0] += n.x as f32;
+                    normal_sums[v.pos][1] += n.y as f32;
+                    normal_sums[v.pos][2] += n.z as f32;
+                }
+            }
+        }
+    } else {
+        for tri in tri_indices.chunks_exact(3) {
+            let ia = tri[0] as usize;
+            let ib = tri[1] as usize;
+            let ic = tri[2] as usize;
+
+            let a = vertices[ia].position;
+            let b = vertices[ib].position;
+            let c = vertices[ic].position;
+
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+
+            let n = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+
+            normal_sums[ia][0] += n[0];
+            normal_sums[ia][1] += n[1];
+            normal_sums[ia][2] += n[2];
+
+            normal_sums[ib][0] += n[0];
+            normal_sums[ib][1] += n[1];
+            normal_sums[ib][2] += n[2];
+
+            normal_sums[ic][0] += n[0];
+            normal_sums[ic][1] += n[1];
+            normal_sums[ic][2] += n[2];
+        }
+    }
+
+    for (v, ns) in vertices.iter_mut().zip(normal_sums.into_iter()) {
+        let len = (ns[0] * ns[0] + ns[1] * ns[1] + ns[2] * ns[2]).sqrt();
+        if len > 1.0e-9 {
+            v.normal = [ns[0] / len, ns[1] / len, ns[2] / len];
+        } else {
+            v.normal = [0.0, 0.0, 1.0];
+        }
+    }
+
+    (vertices, tri_indices)
 }
 
 #[inline]
@@ -236,12 +544,91 @@ impl Default for GridPlane {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolidKind {
+    Box,
+    Sphere,
+    Cylinder,
+    Cone,
+    Torus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneTool {
+    Select,
+    Box,
+    Sphere,
+    Cylinder,
+    Cone,
+    Torus,
+}
+
+impl SceneTool {
+    pub const ALL: [SceneTool; 6] = [
+        SceneTool::Select,
+        SceneTool::Box,
+        SceneTool::Sphere,
+        SceneTool::Cylinder,
+        SceneTool::Cone,
+        SceneTool::Torus,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SceneTool::Select => "Select",
+            SceneTool::Box => "Box",
+            SceneTool::Sphere => "Sphere",
+            SceneTool::Cylinder => "Cylinder",
+            SceneTool::Cone => "Cone",
+            SceneTool::Torus => "Torus",
+        }
+    }
+
+    pub fn create_kind(self) -> Option<SolidKind> {
+        match self {
+            SceneTool::Select => None,
+            SceneTool::Box => Some(SolidKind::Box),
+            SceneTool::Sphere => Some(SolidKind::Sphere),
+            SceneTool::Cylinder => Some(SolidKind::Cylinder),
+            SceneTool::Cone => Some(SolidKind::Cone),
+            SceneTool::Torus => Some(SolidKind::Torus),
+        }
+    }
+}
+
+impl std::fmt::Display for SceneTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SceneEntity {
+    id: u64,
+    kind: SolidKind,
+    position: Vec3,
+    size: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GridKey {
     enabled: bool,
     plane: GridPlane,
     extent: f32,
     step: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreviewKey {
+    start: Vec3,
+    end: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HighlightKey {
+    id: u64,
+    position: Vec3,
+    size: f32,
 }
 
 #[derive(Debug)]
@@ -254,6 +641,16 @@ pub struct Pipeline {
     grid_vertices: wgpu::Buffer,
     grid_vertex_count: u32,
     grid_key: Option<GridKey>,
+    preview_pipeline: wgpu::RenderPipeline,
+    preview_vertices: wgpu::Buffer,
+    preview_vertex_count: u32,
+    preview_key: Option<PreviewKey>,
+    preview_version: u64,
+    highlight_pipeline: wgpu::RenderPipeline,
+    highlight_vertices: wgpu::Buffer,
+    highlight_vertex_count: u32,
+    highlight_key: Option<HighlightKey>,
+    entities_version: u64,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     depth: wgpu::TextureView,
@@ -352,6 +749,78 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.55, 0.58, 0.66, 0.55);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let preview_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_preview_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.95, 0.82, 0.2, 0.9);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let highlight_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_highlight_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.2, 0.9, 0.95, 0.9);
 }
 "#
                 .into(),
@@ -639,6 +1108,86 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let preview_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_preview_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &preview_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &preview_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let highlight_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_highlight_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &highlight_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_depth"),
             size: wgpu::Extent3d {
@@ -659,7 +1208,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             pipeline,
             vertices: vertex_buffer,
             indices: index_buffer,
-            index_count: tri_indices.len() as u32,
+            index_count: 0,
             grid_pipeline,
             grid_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_grid_vertices"),
@@ -669,6 +1218,26 @@ fn fs_main() -> @location(0) vec4<f32> {
             }),
             grid_vertex_count: 0,
             grid_key: None,
+            preview_pipeline,
+            preview_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_preview_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            preview_vertex_count: 0,
+            preview_key: None,
+            preview_version: 0,
+            highlight_pipeline,
+            highlight_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_highlight_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            highlight_vertex_count: 0,
+            highlight_key: None,
+            entities_version: 0,
             uniforms,
             bind_group,
             depth,
@@ -678,7 +1247,7 @@ fn fs_main() -> @location(0) vec4<f32> {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Primitive {
     target: [f32; 3],
     distance: f32,
@@ -688,6 +1257,11 @@ pub struct Primitive {
     grid_plane: GridPlane,
     grid_extent: f32,
     grid_step: f32,
+    entities: Arc<Vec<SceneEntity>>,
+    entities_version: u64,
+    preview_line: Option<(Vec3, Vec3)>,
+    preview_version: u64,
+    selected: Option<u64>,
 }
 
 impl shader::Primitive for Primitive {
@@ -786,6 +1360,103 @@ impl shader::Primitive for Primitive {
                 pipeline.grid_vertex_count = vertices.len() as u32;
             }
         }
+
+        if pipeline.entities_version != self.entities_version {
+            pipeline.entities_version = self.entities_version;
+
+            if let Some(mesh) = build_scene_mesh(self.entities.as_slice()) {
+                let (vertices, indices) = mesh_to_vertex_index(&mesh);
+
+                pipeline.vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_mesh_vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                pipeline.indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_mesh_indices"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                pipeline.index_count = indices.len() as u32;
+            } else {
+                pipeline.index_count = 0;
+            }
+        }
+
+        if pipeline.preview_version != self.preview_version {
+            pipeline.preview_version = self.preview_version;
+            if let Some((start, end)) = self.preview_line {
+                let key = PreviewKey { start, end };
+                if pipeline.preview_key != Some(key) {
+                    pipeline.preview_key = Some(key);
+                    let vertices = [
+                        GridVertex { position: start },
+                        GridVertex { position: end },
+                    ];
+                    pipeline.preview_vertices =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_preview_vertices"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                    pipeline.preview_vertex_count = 2;
+                }
+            } else {
+                pipeline.preview_key = None;
+                pipeline.preview_vertex_count = 0;
+            }
+        }
+
+        let highlight_key = self.selected.and_then(|id| {
+            self.entities
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| HighlightKey {
+                    id: e.id,
+                    position: e.position,
+                    size: e.size,
+                })
+        });
+
+        if pipeline.highlight_key != highlight_key {
+            pipeline.highlight_key = highlight_key;
+            if let Some(key) = highlight_key {
+                let s = (key.size * 0.6).max(0.05);
+                let p = key.position;
+                let vertices = [
+                    GridVertex {
+                        position: [p[0] - s, p[1], p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0] + s, p[1], p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1] - s, p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1] + s, p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1], p[2] - s],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1], p[2] + s],
+                    },
+                ];
+
+                pipeline.highlight_vertices =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("scene_highlight_vertices"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                pipeline.highlight_vertex_count = vertices.len() as u32;
+            } else {
+                pipeline.highlight_vertex_count = 0;
+            }
+        }
     }
 
     fn draw(
@@ -843,11 +1514,27 @@ impl shader::Primitive for Primitive {
             render_pass.draw(0..pipeline.grid_vertex_count, 0..1);
         }
 
+        if pipeline.preview_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.preview_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.preview_vertices.slice(..));
+            render_pass.draw(0..pipeline.preview_vertex_count, 0..1);
+        }
+
+        if pipeline.highlight_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.highlight_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.highlight_vertices.slice(..));
+            render_pass.draw(0..pipeline.highlight_vertex_count, 0..1);
+        }
+
         render_pass.set_pipeline(&pipeline.pipeline);
         render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
         render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
         render_pass.set_index_buffer(pipeline.indices.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
+        if pipeline.index_count > 0 {
+            render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
+        }
     }
 }
 
@@ -857,6 +1544,7 @@ pub struct Scene {
     grid_plane: GridPlane,
     grid_extent: f32,
     grid_step: f32,
+    tool: SceneTool,
 }
 
 #[derive(Debug, Clone)]
@@ -867,6 +1555,16 @@ pub struct SceneState {
     pitch: f32,
     dragging: Dragging,
     last_cursor: Option<Point>,
+    entities: Vec<SceneEntity>,
+    entities_version: u64,
+    selected: Option<u64>,
+    next_id: u64,
+    drag_start: Option<Vec3>,
+    drag_offset: Vec3,
+    modifiers: keyboard::Modifiers,
+    sphere_center: Option<Vec3>,
+    preview_line: Option<(Vec3, Vec3)>,
+    preview_version: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -874,6 +1572,8 @@ enum Dragging {
     None,
     Pan,
     Rotate,
+    MoveEntity,
+    CreateEntity,
 }
 
 impl Default for SceneState {
@@ -885,6 +1585,16 @@ impl Default for SceneState {
             pitch: -0.6,
             dragging: Dragging::None,
             last_cursor: None,
+            entities: Vec::new(),
+            entities_version: 0,
+            selected: None,
+            next_id: 1,
+            drag_start: None,
+            drag_offset: [0.0, 0.0, 0.0],
+            modifiers: keyboard::Modifiers::default(),
+            sphere_center: None,
+            preview_line: None,
+            preview_version: 0,
         }
     }
 }
@@ -900,6 +1610,28 @@ impl<Message> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(mods)) = event {
+            state.modifiers = *mods;
+        }
+
+        if let Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = event {
+            if matches!(
+                key,
+                keyboard::Key::Named(keyboard::key::Named::Delete)
+                    | keyboard::Key::Named(keyboard::key::Named::Backspace)
+            ) {
+                if let Some(selected) = state.selected {
+                    let before = state.entities.len();
+                    state.entities.retain(|e| e.id != selected);
+                    if state.entities.len() != before {
+                        state.entities_version = state.entities_version.wrapping_add(1);
+                    }
+                    state.selected = None;
+                    return Some(shader::Action::request_redraw().and_capture());
+                }
+            }
+        }
+
         let Some(cursor_pos) = cursor.position_in(bounds) else {
             if matches!(
                 event,
@@ -908,11 +1640,14 @@ impl<Message> shader::Program<Message> for Scene {
             ) {
                 state.dragging = Dragging::None;
                 state.last_cursor = None;
+                state.drag_start = None;
                 return Some(shader::Action::request_redraw().and_capture());
             }
 
             return None;
         };
+
+        let camera = camera_from_state(state, bounds);
 
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
@@ -922,68 +1657,178 @@ impl<Message> shader::Program<Message> for Scene {
                 };
 
                 if scroll_y.abs() > f32::EPSILON {
-                    // CAD-like dolly: move camera closer/farther.
                     let factor = 1.1_f32.powf(scroll_y);
                     state.distance = (state.distance / factor).clamp(0.1, 200.0);
                     return Some(shader::Action::request_redraw().and_capture());
                 }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                state.dragging = Dragging::Rotate;
+                if self.tool == SceneTool::Sphere {
+                    if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                            state.sphere_center = Some(hit_pos);
+                            state.preview_line = Some((hit_pos, hit_pos));
+                            state.preview_version = state.preview_version.wrapping_add(1);
+                            state.dragging = Dragging::None;
+                            state.last_cursor = Some(cursor_pos);
+                            return Some(shader::Action::request_redraw().and_capture());
+                        }
+                    }
+                }
+
+                let hit = pick_entity(cursor_pos, bounds, &camera, &state.entities);
+                if let Some(id) = hit {
+                    state.selected = Some(id);
+                    state.dragging = Dragging::MoveEntity;
+                } else if let Some(create_kind) = self.tool.create_kind() {
+                    if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                            let id = state.next_id;
+                            state.next_id += 1;
+                            state.entities.push(SceneEntity {
+                                id,
+                                kind: create_kind,
+                                position: hit_pos,
+                                size: 0.2,
+                            });
+                            state.entities_version = state.entities_version.wrapping_add(1);
+                            state.selected = Some(id);
+                            state.dragging = Dragging::CreateEntity;
+                            state.drag_start = Some(hit_pos);
+                        }
+                    }
+                }
+
+                if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                    if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                        if let Some(id) = state.selected {
+                            if let Some(entity) = state.entities.iter().find(|e| e.id == id) {
+                                state.drag_offset = vec3_sub(entity.position, hit_pos);
+                            }
+                        }
+                    }
+                }
+
                 state.last_cursor = Some(cursor_pos);
                 return Some(shader::Action::request_redraw().and_capture());
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.dragging == Dragging::Rotate {
+                if matches!(state.dragging, Dragging::MoveEntity | Dragging::CreateEntity) {
                     state.dragging = Dragging::None;
                     state.last_cursor = None;
+                    state.drag_start = None;
                     return Some(shader::Action::request_redraw().and_capture());
                 }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                state.dragging = Dragging::Pan;
+                if self.tool == SceneTool::Sphere {
+                    if let Some(center) = state.sphere_center {
+                        if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                                let radius = vec3_dot(vec3_sub(hit_pos, center), vec3_sub(hit_pos, center))
+                                    .sqrt()
+                                    .max(0.05);
+                                let id = state.next_id;
+                                state.next_id += 1;
+                                state.entities.push(SceneEntity {
+                                    id,
+                                    kind: SolidKind::Sphere,
+                                    position: center,
+                                    size: radius * 2.0,
+                                });
+                                state.entities_version = state.entities_version.wrapping_add(1);
+                                state.selected = Some(id);
+                                state.sphere_center = None;
+                                state.preview_line = None;
+                                state.preview_version = state.preview_version.wrapping_add(1);
+                                state.last_cursor = Some(cursor_pos);
+                                return Some(shader::Action::request_redraw().and_capture());
+                            }
+                        }
+                    }
+                }
+
+                if state.modifiers.shift() {
+                    state.dragging = Dragging::Pan;
+                } else {
+                    state.dragging = Dragging::Rotate;
+                }
                 state.last_cursor = Some(cursor_pos);
                 return Some(shader::Action::request_redraw().and_capture());
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
-                if state.dragging == Dragging::Pan {
+                if matches!(state.dragging, Dragging::Pan | Dragging::Rotate) {
                     state.dragging = Dragging::None;
                     state.last_cursor = None;
                     return Some(shader::Action::request_redraw().and_capture());
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if self.tool == SceneTool::Sphere {
+                    if let Some(center) = state.sphere_center {
+                        if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                                state.preview_line = Some((center, hit_pos));
+                                state.preview_version = state.preview_version.wrapping_add(1);
+                                state.last_cursor = Some(cursor_pos);
+                                return Some(shader::Action::request_redraw().and_capture());
+                            }
+                        }
+                    }
+                }
+
                 match state.dragging {
                     Dragging::None => {}
+                    Dragging::MoveEntity => {
+                        if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
+                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                                if let Some(id) = state.selected {
+                                    if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
+                                        entity.position = vec3_add(hit_pos, state.drag_offset);
+                                        state.entities_version = state.entities_version.wrapping_add(1);
+                                    }
+                                }
+                            }
+                        }
+
+                        state.last_cursor = Some(cursor_pos);
+                        return Some(shader::Action::request_redraw().and_capture());
+                    }
+                    Dragging::CreateEntity => {
+                        if let (Some(start), Some((origin, dir))) =
+                            (state.drag_start, ray_from_cursor(cursor_pos, bounds, &camera))
+                        {
+                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
+                                if let Some(id) = state.selected {
+                                    if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
+                                        let diff = vec3_sub(hit_pos, start);
+                                        let dist = vec3_dot(diff, diff).sqrt().max(0.1);
+                                        entity.size = dist;
+                                        state.entities_version = state.entities_version.wrapping_add(1);
+                                    }
+                                }
+                            }
+                        }
+
+                        state.last_cursor = Some(cursor_pos);
+                        return Some(shader::Action::request_redraw().and_capture());
+                    }
                     Dragging::Pan => {
                         if let Some(last) = state.last_cursor {
                             let dx = cursor_pos.x - last.x;
                             let dy = cursor_pos.y - last.y;
 
                             if bounds.width > 1.0 && bounds.height > 1.0 {
-                                // Pixel delta -> NDC delta
                                 let dx_ndc = (dx * 2.0) / bounds.width;
                                 let dy_ndc = (-dy * 2.0) / bounds.height;
 
-                                // NDC delta -> world delta at target depth
-                                let aspect = bounds.width / bounds.height;
-                                let fovy = 45.0_f32.to_radians();
                                 let dist = state.distance.clamp(0.1, 200.0);
-                                let half_h = (0.5 * fovy).tan() * dist;
-                                let half_w = half_h * aspect;
-
-                                // Camera basis
-                                let (sy, cy) = state.yaw.sin_cos();
-                                let (sp, cp) = state.pitch.sin_cos();
-                                let offset = [dist * cp * sy, dist * sp, dist * cp * cy];
-                                let forward = vec3_normalize(vec3_mul(offset, -1.0));
-                                let world_up = [0.0, 1.0, 0.0];
-                                let right = vec3_normalize(vec3_cross(world_up, forward));
-                                let up = vec3_cross(forward, right);
+                                let half_h = (0.5 * camera.fovy).tan() * dist;
+                                let half_w = half_h * camera.aspect;
 
                                 let pan = vec3_add(
-                                    vec3_mul(right, dx_ndc * half_w),
-                                    vec3_mul(up, dy_ndc * half_h),
+                                    vec3_mul(camera.right, dx_ndc * half_w),
+                                    vec3_mul(camera.up, dy_ndc * half_h),
                                 );
                                 state.target = vec3_add(state.target, pan);
                             }
@@ -1000,7 +1845,6 @@ impl<Message> shader::Program<Message> for Scene {
                             let dx = cursor_pos.x - last.x;
                             let dy = cursor_pos.y - last.y;
 
-                            // CAD-like orbit: scale by viewport size.
                             let rot_speed = 2.5;
                             if bounds.width > 1.0 && bounds.height > 1.0 {
                                 state.yaw += (dx / bounds.width) * rot_speed;
@@ -1010,7 +1854,7 @@ impl<Message> shader::Program<Message> for Scene {
                                 state.pitch += dy * 0.01;
                             }
 
-                            let max_pitch = 1.55; // ~89deg to avoid flipping
+                            let max_pitch = 1.55;
                             state.pitch = state.pitch.clamp(-max_pitch, max_pitch);
 
                             state.last_cursor = Some(cursor_pos);
@@ -1038,6 +1882,11 @@ impl<Message> shader::Program<Message> for Scene {
             grid_plane: self.grid_plane,
             grid_extent: self.grid_extent,
             grid_step: self.grid_step,
+            entities: Arc::new(state.entities.clone()),
+            entities_version: state.entities_version,
+            preview_line: state.preview_line,
+            preview_version: state.preview_version,
+            selected: state.selected,
         }
     }
 
@@ -1062,6 +1911,7 @@ pub fn widget<'a, Message>(
     grid_plane: GridPlane,
     grid_extent: f32,
     grid_step: f32,
+    tool: SceneTool,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -1071,6 +1921,7 @@ where
         grid_plane,
         grid_extent,
         grid_step,
+        tool,
     })
         .width(Length::Fill)
         .height(Length::Fill)
