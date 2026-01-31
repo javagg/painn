@@ -4,6 +4,7 @@ mod canvas;
 mod cad;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
+use scene::GridPlane;
 use iced::widget::{button, column, pick_list, row, slider, text};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
@@ -56,6 +57,10 @@ enum Message {
     TabChanged(Tab),
     ToolChanged(Tool),
     ModeChanged(BooleanMode),
+    SceneGridToggle,
+    SceneGridPlaneChanged(GridPlane),
+    SceneGridExtentChanged(f32),
+    SceneGridStepChanged(f32),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
@@ -76,6 +81,10 @@ struct App {
     active_tab: Tab,
     tool: Tool,
     mode: BooleanMode,
+    scene_show_grid: bool,
+    scene_grid_plane: GridPlane,
+    scene_grid_extent: f32,
+    scene_grid_step: f32,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -96,6 +105,10 @@ impl App {
             active_tab: Tab::Draw,
             tool: Tool::Line,
             mode: BooleanMode::Add,
+            scene_show_grid: true,
+            scene_grid_plane: GridPlane::XZ,
+            scene_grid_extent: 2.5,
+            scene_grid_step: 0.25,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -134,6 +147,22 @@ impl App {
             }
             Message::ModeChanged(mode) => {
                 self.mode = mode;
+                self.invalidate();
+            }
+            Message::SceneGridToggle => {
+                self.scene_show_grid = !self.scene_show_grid;
+                self.invalidate();
+            }
+            Message::SceneGridPlaneChanged(plane) => {
+                self.scene_grid_plane = plane;
+                self.invalidate();
+            }
+            Message::SceneGridExtentChanged(value) => {
+                self.scene_grid_extent = value.max(0.5);
+                self.invalidate();
+            }
+            Message::SceneGridStepChanged(value) => {
+                self.scene_grid_step = value.max(0.05);
                 self.invalidate();
             }
             Message::StrokeWidthChanged(w) => {
@@ -647,7 +676,44 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let scene_tab = column![scene::widget::<Message>()]
+        let scene_controls = column![
+            row![
+                button(if self.scene_show_grid { "网格：开" } else { "网格：关" })
+                    .on_press(Message::SceneGridToggle),
+                text("平面"),
+                pick_list(
+                    GridPlane::ALL.as_slice(),
+                    Some(self.scene_grid_plane),
+                    Message::SceneGridPlaneChanged,
+                )
+                .width(Length::Fixed(120.0)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+            row![
+                text("范围"),
+                slider(0.5..=10.0, self.scene_grid_extent, Message::SceneGridExtentChanged)
+                    .width(Length::Fixed(200.0)),
+                text(format!("{:.2}", self.scene_grid_extent)),
+                text("密度"),
+                slider(0.05..=2.0, self.scene_grid_step, Message::SceneGridStepChanged)
+                    .width(Length::Fixed(200.0)),
+                text(format!("{:.2}", self.scene_grid_step)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+
+        let scene_view = scene::widget::<Message>(
+            self.scene_show_grid,
+            self.scene_grid_plane,
+            self.scene_grid_extent,
+            self.scene_grid_step,
+        );
+
+        let scene_tab = column![scene_controls, scene_view]
+            .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill);

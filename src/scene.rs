@@ -1,6 +1,7 @@
 use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Element, Event, Length, Point, Rectangle};
 use iced::wgpu;
+use wgpu::util::DeviceExt;
 
 use crate::cad;
 
@@ -18,6 +19,24 @@ impl Vertex {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRS,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GridVertex {
+    position: [f32; 3],
+}
+
+impl GridVertex {
+    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GridVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRS,
         }
@@ -124,11 +143,105 @@ fn mat4_look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> [[f32; 4]; 4] {
     [col0, col1, col2, col3]
 }
 
+fn build_grid_vertices(plane: GridPlane, extent: f32, step: f32) -> Vec<GridVertex> {
+    let steps = (extent / step).round() as i32;
+    let mut out = Vec::new();
+
+    for i in -steps..=steps {
+        let v = i as f32 * step;
+        match plane {
+            GridPlane::XY => {
+                out.push(GridVertex {
+                    position: [-extent, v, 0.0],
+                });
+                out.push(GridVertex {
+                    position: [extent, v, 0.0],
+                });
+                out.push(GridVertex {
+                    position: [v, -extent, 0.0],
+                });
+                out.push(GridVertex {
+                    position: [v, extent, 0.0],
+                });
+            }
+            GridPlane::YZ => {
+                out.push(GridVertex {
+                    position: [0.0, -extent, v],
+                });
+                out.push(GridVertex {
+                    position: [0.0, extent, v],
+                });
+                out.push(GridVertex {
+                    position: [0.0, v, -extent],
+                });
+                out.push(GridVertex {
+                    position: [0.0, v, extent],
+                });
+            }
+            GridPlane::XZ => {
+                out.push(GridVertex {
+                    position: [-extent, 0.0, v],
+                });
+                out.push(GridVertex {
+                    position: [extent, 0.0, v],
+                });
+                out.push(GridVertex {
+                    position: [v, 0.0, -extent],
+                });
+                out.push(GridVertex {
+                    position: [v, 0.0, extent],
+                });
+            }
+        }
+    }
+
+    out
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     model_view: [[f32; 4]; 4],
     mvp: [[f32; 4]; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridPlane {
+    XY,
+    YZ,
+    XZ,
+}
+
+impl GridPlane {
+    pub const ALL: [GridPlane; 3] = [GridPlane::XY, GridPlane::YZ, GridPlane::XZ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GridPlane::XY => "XY",
+            GridPlane::YZ => "YZ",
+            GridPlane::XZ => "XZ",
+        }
+    }
+}
+
+impl std::fmt::Display for GridPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl Default for GridPlane {
+    fn default() -> Self {
+        GridPlane::XZ
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GridKey {
+    enabled: bool,
+    plane: GridPlane,
+    extent: f32,
+    step: f32,
 }
 
 #[derive(Debug)]
@@ -137,6 +250,10 @@ pub struct Pipeline {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+    grid_pipeline: wgpu::RenderPipeline,
+    grid_vertices: wgpu::Buffer,
+    grid_vertex_count: u32,
+    grid_key: Option<GridKey>,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     depth: wgpu::TextureView,
@@ -202,6 +319,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#
                     .into(),
+            ),
+        });
+
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_grid_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.55, 0.58, 0.66, 0.55);
+}
+"#
+                .into(),
             ),
         });
 
@@ -446,6 +599,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_grid_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scene_depth"),
             size: wgpu::Extent3d {
@@ -467,6 +660,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             vertices: vertex_buffer,
             indices: index_buffer,
             index_count: tri_indices.len() as u32,
+            grid_pipeline,
+            grid_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_grid_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            grid_vertex_count: 0,
+            grid_key: None,
             uniforms,
             bind_group,
             depth,
@@ -482,6 +684,10 @@ pub struct Primitive {
     distance: f32,
     yaw: f32,
     pitch: f32,
+    show_grid: bool,
+    grid_plane: GridPlane,
+    grid_extent: f32,
+    grid_step: f32,
 }
 
 impl shader::Primitive for Primitive {
@@ -555,6 +761,31 @@ impl shader::Primitive for Primitive {
 
         let uniforms = Uniforms { model_view, mvp };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        let grid_key = GridKey {
+            enabled: self.show_grid,
+            plane: self.grid_plane,
+            extent: self.grid_extent,
+            step: self.grid_step,
+        };
+        if pipeline.grid_key != Some(grid_key) {
+            pipeline.grid_key = Some(grid_key);
+            if !self.show_grid {
+                pipeline.grid_vertex_count = 0;
+            } else {
+                let extent = self.grid_extent.max(0.5);
+                let step = self.grid_step.max(0.05);
+                let vertices = build_grid_vertices(self.grid_plane, extent, step);
+
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_grid_vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                pipeline.grid_vertices = buffer;
+                pipeline.grid_vertex_count = vertices.len() as u32;
+            }
+        }
     }
 
     fn draw(
@@ -605,6 +836,13 @@ impl shader::Primitive for Primitive {
             clip_bounds.height,
         );
 
+        if pipeline.grid_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.grid_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.grid_vertices.slice(..));
+            render_pass.draw(0..pipeline.grid_vertex_count, 0..1);
+        }
+
         render_pass.set_pipeline(&pipeline.pipeline);
         render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
         render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
@@ -614,7 +852,12 @@ impl shader::Primitive for Primitive {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Scene;
+pub struct Scene {
+    show_grid: bool,
+    grid_plane: GridPlane,
+    grid_extent: f32,
+    grid_step: f32,
+}
 
 #[derive(Debug, Clone)]
 pub struct SceneState {
@@ -791,6 +1034,10 @@ impl<Message> shader::Program<Message> for Scene {
             distance: state.distance,
             yaw: state.yaw,
             pitch: state.pitch,
+            show_grid: self.show_grid,
+            grid_plane: self.grid_plane,
+            grid_extent: self.grid_extent,
+            grid_step: self.grid_step,
         }
     }
 
@@ -810,11 +1057,21 @@ impl<Message> shader::Program<Message> for Scene {
     }
 }
 
-pub fn widget<'a, Message>() -> Element<'a, Message>
+pub fn widget<'a, Message>(
+    show_grid: bool,
+    grid_plane: GridPlane,
+    grid_extent: f32,
+    grid_step: f32,
+) -> Element<'a, Message>
 where
     Message: 'a,
 {
-    iced::widget::shader::Shader::new(Scene)
+    iced::widget::shader::Shader::new(Scene {
+        show_grid,
+        grid_plane,
+        grid_extent,
+        grid_step,
+    })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
