@@ -793,11 +793,30 @@ impl std::fmt::Display for SceneTool {
 }
 
 #[derive(Debug, Clone)]
-struct SceneEntity {
+pub struct SceneEntity {
     id: u64,
     kind: SolidKind,
     position: Vec3,
     size: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneEntityInfo {
+    pub id: u64,
+    pub kind: SolidKind,
+    pub position: [f32; 3],
+    pub size: f32,
+}
+
+impl From<&SceneEntity> for SceneEntityInfo {
+    fn from(e: &SceneEntity) -> Self {
+        Self {
+            id: e.id,
+            kind: e.kind,
+            position: e.position,
+            size: e.size,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1913,8 +1932,8 @@ impl shader::Primitive for Primitive {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Scene {
+#[derive(Clone)]
+pub struct Scene<Message> {
     show_grid: bool,
     grid_plane: GridPlane,
     grid_extent: f32,
@@ -1925,6 +1944,9 @@ pub struct Scene {
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>, 
+    request_select_id: Option<u64>,
+    request_focus_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1979,7 +2001,7 @@ impl Default for SceneState {
     }
 }
 
-impl<Message> shader::Program<Message> for Scene {
+impl<Message> shader::Program<Message> for Scene<Message> {
     type State = SceneState;
     type Primitive = Primitive;
 
@@ -1990,6 +2012,17 @@ impl<Message> shader::Program<Message> for Scene {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        // Apply sidebar-driven requests (select/focus)
+        if let Some(id) = self.request_select_id {
+            if state.entities.iter().any(|e| e.id == id) {
+                state.selected = Some(id);
+            }
+        }
+        if let Some(id) = self.request_focus_id {
+            if let Some(ent) = state.entities.iter().find(|e| e.id == id) {
+                state.target = ent.position;
+            }
+        }
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(mods)) = event {
             state.modifiers = *mods;
         }
@@ -2005,6 +2038,10 @@ impl<Message> shader::Program<Message> for Scene {
                     state.entities.retain(|e| e.id != selected);
                     if state.entities.len() != before {
                         state.entities_version = state.entities_version.wrapping_add(1);
+                        if let Some(cb) = &self.on_entities_snapshot {
+                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
+                            return Some(shader::Action::publish(cb(list)).and_capture());
+                        }
                     }
                     state.selected = None;
                     return Some(shader::Action::request_redraw().and_capture());
@@ -2078,6 +2115,10 @@ impl<Message> shader::Program<Message> for Scene {
                                 size: 0.2,
                             });
                             state.entities_version = state.entities_version.wrapping_add(1);
+                            if let Some(cb) = &self.on_entities_snapshot {
+                                let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
+                                return Some(shader::Action::publish(cb(list)).and_capture());
+                            }
                             state.selected = Some(id);
                             state.dragging = Dragging::CreateEntity;
                             state.drag_start = Some(hit_pos);
@@ -2123,6 +2164,10 @@ impl<Message> shader::Program<Message> for Scene {
                                     size: radius * 2.0,
                                 });
                                 state.entities_version = state.entities_version.wrapping_add(1);
+                                if let Some(cb) = &self.on_entities_snapshot {
+                                    let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
+                                    return Some(shader::Action::publish(cb(list)).and_capture());
+                                }
                                 state.selected = Some(id);
                                 state.sphere_center = None;
                                 state.preview_line = None;
@@ -2172,6 +2217,10 @@ impl<Message> shader::Program<Message> for Scene {
                                     if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
                                         entity.position = vec3_add(hit_pos, state.drag_offset);
                                         state.entities_version = state.entities_version.wrapping_add(1);
+                                        if let Some(cb) = &self.on_entities_snapshot {
+                                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
+                                            return Some(shader::Action::publish(cb(list)).and_capture());
+                                        }
                                     }
                                 }
                             }
@@ -2191,6 +2240,10 @@ impl<Message> shader::Program<Message> for Scene {
                                         let dist = vec3_dot(diff, diff).sqrt().max(0.1);
                                         entity.size = dist;
                                         state.entities_version = state.entities_version.wrapping_add(1);
+                                        if let Some(cb) = &self.on_entities_snapshot {
+                                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
+                                            return Some(shader::Action::publish(cb(list)).and_capture());
+                                        }
                                     }
                                 }
                             }
@@ -2306,6 +2359,9 @@ pub fn widget<'a, Message>(
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    request_select_id: Option<u64>,
+    request_focus_id: Option<u64>,
+    on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -2321,6 +2377,9 @@ where
         axes_enabled,
         axes_size,
         axes_margin,
+        on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
+        request_select_id,
+        request_focus_id,
     })
         .width(Length::Fill)
         .height(Length::Fill)

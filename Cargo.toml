@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["canvas"] }
-iced_widget = "0.14.2"
-iced_wgpu = "0.14.0"
+iced = { version = "0.14", features = ["canvas"] }
+iced_widget = "0.14"
+iced_wgpu = "0.14"
+iced_aw = { version = "0.13", features = ["full"] }
 bytemuck = { version = "1", features = ["derive"] }
 vello = "0.7.0"
 i_overlay = "4.2.2"
@@ -16,3 +17,4 @@ truck-topology = "0.6.0"
 truck-polymesh = "0.6.0"
 truck-shapeops = "0.4.0"
 truck-meshalgo = "0.4.0"
+nalgebra-glm = "0.20"

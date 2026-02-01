@@ -2,10 +2,11 @@ mod drawing;
 mod scene;
 mod canvas;
 mod cad;
+mod controls;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
-use scene::{CameraMode, CameraPreset, GridPlane, SceneTool};
-use iced::widget::{button, column, pick_list, row, slider, text};
+use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
+use iced::widget::{column, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 
 use i_float::int::point::IntPoint;
@@ -75,6 +76,24 @@ enum Message {
     Undo,
     DeleteSelected,
     Clear,
+    ToggleMenuBar,
+    // File
+    OpenFile,
+    SaveFile,
+    SaveFileAs,
+    Quit,
+    // Edit
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    // Help
+    About,
+    // Scene entities snapshot
+    SceneEntitiesSnapshot(Vec<SceneEntityInfo>),
+    // Scene actions from sidebar
+    SceneSelectEntity(u64),
+    SceneFocusEntity(u64),
     Canvas(CanvasEvent),
 }
 
@@ -109,6 +128,10 @@ struct App {
     dragging: bool,
     drag_last: Option<iced::Point>,
     draft: Draft,
+    show_menubar: bool,
+    scene_entities: Vec<SceneEntityInfo>,
+    scene_request_select_id: Option<u64>,
+    scene_request_focus_id: Option<u64>,
 }
 
 impl App {
@@ -139,6 +162,10 @@ impl App {
             dragging: false,
             drag_last: None,
             draft: Draft::default(),
+            show_menubar: false,
+            scene_entities: Vec::new(),
+            scene_request_select_id: None,
+            scene_request_focus_id: None,
         }
     }
 
@@ -236,6 +263,10 @@ impl App {
                 self.show_grid = !self.show_grid;
                 self.invalidate();
             }
+            Message::ToggleMenuBar => {
+                self.show_menubar = !self.show_menubar;
+                self.invalidate();
+            }
             Message::ResetZoom => {
                 if (self.zoom - 1.0).abs() > f32::EPSILON {
                     self.zoom = 1.0;
@@ -250,6 +281,9 @@ impl App {
                 self.drag_last = None;
                 self.reset_draft();
                 self.invalidate();
+            }
+            Message::Redo => {
+                // Not implemented yet
             }
             Message::DeleteSelected => {
                 if let Some(index) = self.selected {
@@ -267,6 +301,42 @@ impl App {
                 self.drag_last = None;
                 self.reset_draft();
                 self.invalidate();
+            }
+            Message::OpenFile => {
+                // TODO: file open dialog
+            }
+            Message::SaveFile => {
+                // TODO: save current document
+            }
+            Message::SaveFileAs => {
+                // TODO: save as dialog
+            }
+            Message::Cut => {
+                // TODO: cut selection
+            }
+            Message::Copy => {
+                // TODO: copy selection
+            }
+            Message::Paste => {
+                // TODO: paste from clipboard
+            }
+            Message::About => {
+                // TODO: show about dialog
+            }
+            Message::SceneEntitiesSnapshot(list) => {
+                self.scene_entities = list;
+                self.invalidate();
+            }
+            Message::SceneSelectEntity(id) => {
+                self.scene_request_select_id = Some(id);
+                self.invalidate();
+            }
+            Message::SceneFocusEntity(id) => {
+                self.scene_request_focus_id = Some(id);
+                self.invalidate();
+            }
+            Message::Quit => {
+                // TODO: request app quit (platform dependent)
             }
             Message::Canvas(event) => {
                 match event {
@@ -386,39 +456,37 @@ impl App {
                     self.cursor_pos = Some(p);
                 }
             },
-            CanvasEvent::PressedRight(_p) => {
-                match self.tool {
-                    Tool::Spline => {
-                        if self.draft.spline_points.len() >= 2 {
-                            let points = std::mem::take(&mut self.draft.spline_points);
-                            self.shapes.push(Shape::Spline {
-                                points,
-                                stroke_color: self.stroke_color,
-                                stroke_width: self.stroke_width,
-                            });
-                        }
-
-                        self.reset_draft();
-                        self.invalidate();
+            CanvasEvent::PressedRight(_p) => match self.tool {
+                Tool::Spline => {
+                    if self.draft.spline_points.len() >= 2 {
+                        let points = std::mem::take(&mut self.draft.spline_points);
+                        self.shapes.push(Shape::Spline {
+                            points,
+                            stroke_color: self.stroke_color,
+                            stroke_width: self.stroke_width,
+                        });
                     }
-                    Tool::Polygon => {
-                        if self.draft.polygon_points.len() >= 3 {
-                            let points = std::mem::take(&mut self.draft.polygon_points);
-                            self.commit_new_shape(Shape::Polygon {
-                                outer: points,
-                                holes: Vec::new(),
-                                stroke_color: self.stroke_color,
-                                fill_color: self.fill_color,
-                                stroke_width: self.stroke_width,
-                            });
-                        }
 
-                        self.reset_draft();
-                        self.invalidate();
-                    }
-                    _ => {}
+                    self.reset_draft();
+                    self.invalidate();
                 }
-            }
+                Tool::Polygon => {
+                    if self.draft.polygon_points.len() >= 3 {
+                        let points = std::mem::take(&mut self.draft.polygon_points);
+                        self.commit_new_shape(Shape::Polygon {
+                            outer: points,
+                            holes: Vec::new(),
+                            stroke_color: self.stroke_color,
+                            fill_color: self.fill_color,
+                            stroke_width: self.stroke_width,
+                        });
+                    }
+
+                    self.reset_draft();
+                    self.invalidate();
+                }
+                _ => {}
+            },
             CanvasEvent::ZoomAt { .. } => {
                 // Zoom handled in update
             }
@@ -503,191 +571,133 @@ impl App {
         }
     }
 
-
     const BOOL_SCALE: f32 = 1000.0;
 
     fn shape_is_region(shape: &Shape) -> bool {
-    matches!(shape, Shape::Rect { .. } | Shape::Circle { .. } | Shape::Polygon { .. })
-}
+        matches!(shape, Shape::Rect { .. } | Shape::Circle { .. } | Shape::Polygon { .. })
+    }
 
     fn p_to_int(p: iced::Point) -> IntPoint {
-    let x = (p.x * Self::BOOL_SCALE).round();
-    let y = (p.y * Self::BOOL_SCALE).round();
-    IntPoint::new(
-        x.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
-        y.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
-    )
-}
+        let x = (p.x * Self::BOOL_SCALE).round();
+        let y = (p.y * Self::BOOL_SCALE).round();
+        IntPoint::new(
+            x.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+            y.clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+        )
+    }
 
     fn int_to_p(p: IntPoint) -> iced::Point {
-    iced::Point {
-        x: (p.x as f32) / Self::BOOL_SCALE,
-        y: (p.y as f32) / Self::BOOL_SCALE,
+        iced::Point {
+            x: (p.x as f32) / Self::BOOL_SCALE,
+            y: (p.y as f32) / Self::BOOL_SCALE,
+        }
     }
-}
 
     fn shape_to_int_contours(shape: &Shape) -> Vec<Vec<IntPoint>> {
-    match shape {
-        Shape::Rect { from, to, .. } => {
-            let x0 = from.x.min(to.x);
-            let y0 = from.y.min(to.y);
-            let x1 = from.x.max(to.x);
-            let y1 = from.y.max(to.y);
-            vec![vec![
-                Self::p_to_int(iced::Point { x: x0, y: y0 }),
-                Self::p_to_int(iced::Point { x: x1, y: y0 }),
-                Self::p_to_int(iced::Point { x: x1, y: y1 }),
-                Self::p_to_int(iced::Point { x: x0, y: y1 }),
-            ]]
-        }
-        Shape::Circle { center, radius, .. } => {
-            let steps = 64usize;
-            let mut contour = Vec::with_capacity(steps);
-            for i in 0..steps {
-                let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
-                contour.push(Self::p_to_int(iced::Point {
-                    x: center.x + radius * t.cos(),
-                    y: center.y + radius * t.sin(),
-                }));
+        match shape {
+            Shape::Rect { from, to, .. } => {
+                let x0 = from.x.min(to.x);
+                let y0 = from.y.min(to.y);
+                let x1 = from.x.max(to.x);
+                let y1 = from.y.max(to.y);
+                vec![vec![
+                    Self::p_to_int(iced::Point { x: x0, y: y0 }),
+                    Self::p_to_int(iced::Point { x: x1, y: y0 }),
+                    Self::p_to_int(iced::Point { x: x1, y: y1 }),
+                    Self::p_to_int(iced::Point { x: x0, y: y1 }),
+                ]]
             }
-            vec![contour]
-        }
-        Shape::Polygon { outer, holes, .. } => {
-            if outer.len() < 3 {
-                return Vec::new();
-            }
-            let mut out = Vec::new();
-            out.push(outer.iter().map(|p| Self::p_to_int(*p)).collect());
-            for hole in holes {
-                if hole.len() < 3 {
-                    continue;
+            Shape::Circle { center, radius, .. } => {
+                let steps = 64usize;
+                let mut contour = Vec::with_capacity(steps);
+                for i in 0..steps {
+                    let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+                    contour.push(Self::p_to_int(iced::Point {
+                        x: center.x + radius * t.cos(),
+                        y: center.y + radius * t.sin(),
+                    }));
                 }
-                out.push(hole.iter().map(|p| Self::p_to_int(*p)).collect());
+                vec![contour]
             }
-            out
+            Shape::Polygon { outer, holes, .. } => {
+                if outer.len() < 3 {
+                    return Vec::new();
+                }
+                let mut out = Vec::new();
+                out.push(outer.iter().map(|p| Self::p_to_int(*p)).collect());
+                for hole in holes {
+                    if hole.len() < 3 {
+                        continue;
+                    }
+                    out.push(hole.iter().map(|p| Self::p_to_int(*p)).collect());
+                }
+                out
+            }
+            Shape::Line { .. } | Shape::Spline { .. } => Vec::new(),
         }
-        Shape::Line { .. } | Shape::Spline { .. } => Vec::new(),
     }
-}
 
     fn int_shapes_to_shapes(
-    int_shapes: Vec<Vec<Vec<IntPoint>>>,
-    stroke_color: Color,
-    fill_color: Option<Color>,
-    stroke_width: f32,
-) -> Vec<Shape> {
-    let mut out = Vec::new();
-    for shape in int_shapes {
-        if shape.is_empty() {
-            continue;
+        int_shapes: Vec<Vec<Vec<IntPoint>>>,
+        stroke_color: Color,
+        fill_color: Option<Color>,
+        stroke_width: f32,
+    ) -> Vec<Shape> {
+        let mut out = Vec::new();
+        for shape in int_shapes {
+            if shape.is_empty() {
+                continue;
+            }
+            let outer = shape[0]
+                .iter()
+                .copied()
+                .map(Self::int_to_p)
+                .collect::<Vec<_>>();
+            if outer.len() < 3 {
+                continue;
+            }
+            let holes = shape
+                .iter()
+                .skip(1)
+                .map(|c| c.iter().copied().map(Self::int_to_p).collect::<Vec<_>>())
+                .filter(|c| c.len() >= 3)
+                .collect::<Vec<_>>();
+            out.push(Shape::Polygon {
+                outer,
+                holes,
+                stroke_color,
+                fill_color,
+                stroke_width,
+            });
         }
-        let outer = shape[0]
-            .iter()
-            .copied()
-            .map(Self::int_to_p)
-            .collect::<Vec<_>>();
-        if outer.len() < 3 {
-            continue;
-        }
-        let holes = shape
-            .iter()
-            .skip(1)
-            .map(|c| c.iter().copied().map(Self::int_to_p).collect::<Vec<_>>())
-            .filter(|c| c.len() >= 3)
-            .collect::<Vec<_>>();
-        out.push(Shape::Polygon {
-            outer,
-            holes,
-            stroke_color,
-            fill_color,
-            stroke_width,
-        });
+        out
     }
-    out
-}
 
     fn view(&self) -> Element<'_, Message> {
         let tab_bar = row![
-            tab_button("Render", Tab::Scene, self.active_tab),
-            tab_button("Draw", Tab::Draw, self.active_tab),
+            controls::tab_button("Render", Tab::Scene, self.active_tab),
+            controls::tab_button("Draw", Tab::Draw, self.active_tab),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let toolbar = || {
-            row![
-                text("Tool"),
-                pick_list(Tool::ALL.as_slice(), Some(self.tool), Message::ToolChanged)
-                    .width(Length::Fixed(120.0)),
-                text("Mode"),
-                pick_list(BooleanMode::ALL.as_slice(), Some(self.mode), Message::ModeChanged)
-                    .width(Length::Fixed(120.0)),
-                text("Stroke"),
-                slider(1.0..=16.0, self.stroke_width, Message::StrokeWidthChanged)
-                    .width(Length::Fixed(180.0)),
-                text(format!("{:.1}", self.stroke_width)),
-                button(if self.show_grid { "Grid: On" } else { "Grid: Off" })
-                    .on_press(Message::ToggleGrid),
-                button("Reset Zoom").on_press(Message::ResetZoom),
-                button("Undo").on_press(Message::Undo),
-                button("Delete Selected")
-                    .on_press_maybe(self.selected.map(|_| Message::DeleteSelected)),
-                button("Clear").on_press(Message::Clear),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
+        let menu_bar: Option<Element<'_, Message>> = if self.show_menubar {
+            Some(controls::build_menu_bar(self))
+        } else {
+            None
         };
 
-        let stroke_row = || {
-            row![
-                text("Stroke"),
-                button("Black").on_press(Message::StrokeColorChanged(Color::BLACK)),
-                button("Red")
-                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0xE6, 0x2E, 0x2E))),
-                button("Green")
-                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xE6, 0x6B))),
-                button("Blue")
-                    .on_press(Message::StrokeColorChanged(Color::from_rgb8(0x2E, 0xB8, 0xE6))),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-        };
-
-        let fill_row = || {
-            row![
-                text("Fill"),
-                button("None").on_press(Message::FillColorChanged(None)),
-                button("Light Blue")
-                    .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xB3, 0xD9, 0xFF)))),
-                button("Light Red")
-                    .on_press(Message::FillColorChanged(Some(Color::from_rgb8(0xFF, 0xB3, 0xB3)))),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-        };
-
-        let hint = match self.tool {
-            Tool::Select => "Select: left click a shape; delete selected",
-            Tool::Spline => "Spline: left click to add points, right click to finish",
-            Tool::Polygon => "Polygon: left click to add points, right click to close",
-            _ => "Drag to draw: press-move-release",
-        };
-
-        let status = || {
-            row![
-                text(format!("Zoom: {:.0}%", self.zoom * 100.0)),
-                text("|"),
-                text(match self.cursor_pos {
-                    Some(p) => format!("Coords: {:.1}, {:.1}", p.x, p.y),
-                    None => "Coords: --".to_string(),
-                }),
-                text("|"),
-                text(hint),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-        };
-
+        let toolbar = controls::draw_toolbar(
+            self.tool,
+            self.mode,
+            self.stroke_width,
+            self.show_grid,
+            self.show_menubar,
+            self.selected,
+        );
+        let stroke_row = controls::stroke_row();
+        let fill_row = controls::fill_row();
+        let status = controls::status_row(self.tool, self.zoom, self.cursor_pos);
         let board = canvas::canvas(
             self.tool,
             self.shapes.as_slice(),
@@ -702,85 +712,24 @@ impl App {
             wrap_canvas_event,
         );
 
-        let draw_tab = column![toolbar(), stroke_row(), fill_row(), board, status()]
+        let draw_tab = column![toolbar, stroke_row, fill_row, board, status]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let scene_controls = column![
-            row![
-                button(if self.scene_show_grid { "Grid: On" } else { "Grid: Off" })
-                    .on_press(Message::SceneGridToggle),
-                text("Plane"),
-                pick_list(
-                    GridPlane::ALL.as_slice(),
-                    Some(self.scene_grid_plane),
-                    Message::SceneGridPlaneChanged,
-                )
-                .width(Length::Fixed(120.0)),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            row![
-                text("Primitive"),
-                pick_list(
-                    SceneTool::ALL.as_slice(),
-                    Some(self.scene_tool),
-                    Message::SceneToolChanged,
-                )
-                .width(Length::Fixed(160.0)),
-                text("Create with left click + drag"),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            row![
-                text("Camera"),
-                pick_list(
-                    CameraMode::ALL.as_slice(),
-                    Some(self.scene_camera_mode),
-                    Message::SceneCameraModeChanged,
-                )
-                .width(Length::Fixed(160.0)),
-                text("Align"),
-                pick_list(
-                    CameraPreset::ALL.as_slice(),
-                    self.scene_camera_preset,
-                    Message::SceneCameraPresetChanged,
-                )
-                .width(Length::Fixed(160.0)),
-                button("Clear Align").on_press(Message::SceneCameraPresetCleared),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            row![
-                button(if self.scene_axes_enabled { "Axes: On" } else { "Axes: Off" })
-                    .on_press(Message::SceneAxesToggle),
-                text("Size"),
-                slider(24.0..=240.0, self.scene_axes_size, Message::SceneAxesSizeChanged)
-                    .width(Length::Fixed(200.0)),
-                text(format!("{:.0}", self.scene_axes_size)),
-                text("Margin"),
-                slider(0.0..=64.0, self.scene_axes_margin, Message::SceneAxesMarginChanged)
-                    .width(Length::Fixed(160.0)),
-                text(format!("{:.0}", self.scene_axes_margin)),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-            row![
-                text("Range"),
-                slider(0.5..=10.0, self.scene_grid_extent, Message::SceneGridExtentChanged)
-                    .width(Length::Fixed(200.0)),
-                text(format!("{:.2}", self.scene_grid_extent)),
-                text("Density"),
-                slider(0.05..=2.0, self.scene_grid_step, Message::SceneGridStepChanged)
-                    .width(Length::Fixed(200.0)),
-                text(format!("{:.2}", self.scene_grid_step)),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(8);
+        let scene_controls = controls::scene_controls(
+            self.scene_show_grid,
+            self.scene_grid_plane,
+            self.scene_tool,
+            self.scene_camera_mode,
+            self.scene_camera_preset,
+            self.scene_axes_enabled,
+            self.scene_axes_size,
+            self.scene_axes_margin,
+            self.scene_grid_extent,
+            self.scene_grid_step,
+        );
 
         let scene_view = scene::widget::<Message>(
             self.scene_show_grid,
@@ -793,20 +742,29 @@ impl App {
             self.scene_axes_enabled,
             self.scene_axes_size,
             self.scene_axes_margin,
+            self.scene_request_select_id,
+            self.scene_request_focus_id,
+            |list| Message::SceneEntitiesSnapshot(list),
         );
 
-        let scene_tab = column![scene_controls, scene_view]
+        let sidebar = controls::build_scene_sidebar(&self.scene_entities);
+        let scene_tab = row![sidebar, column![scene_controls, scene_view].spacing(10)]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let content = match self.active_tab {
-            Tab::Draw => draw_tab,
-            Tab::Scene => scene_tab,
+        let content: Element<Message> = match self.active_tab {
+            Tab::Draw => draw_tab.into(),
+            Tab::Scene => scene_tab.into(),
         };
 
-        column![tab_bar, content]
+        let mut top = column![tab_bar];
+        if let Some(m) = menu_bar {
+            top = top.push(m);
+        }
+        top = top.push(content);
+        top
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
@@ -815,13 +773,7 @@ impl App {
     }
 }
 
-fn tab_button(label: &str, tab: Tab, active: Tab) -> iced::widget::Button<'_, Message> {
-    if tab == active {
-        button(text(format!("● {label}"))).on_press_maybe(None)
-    } else {
-        button(text(label)).on_press(Message::TabChanged(tab))
-    }
-}
+// UI widget helpers are now in `controls.rs`
 
 fn finish_drag_shape(
     tool: Tool,
