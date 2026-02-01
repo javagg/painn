@@ -6,7 +6,7 @@ use iced::advanced::{
 };
 use iced::advanced::text::Renderer as TextRenderer;
 use std::collections::HashSet;
-use truck_polymesh::PolygonMesh;
+use truck_modeling::Solid;
 
 use crate::cad;
 use iced_aw::menu;
@@ -91,14 +91,13 @@ const TOGGLE_SIZE: f32 = 12.0;
 const ACTION_W: f32 = 44.0;
 const ACTION_H: f32 = 18.0;
 const ACTION_GAP: f32 = 6.0;
-const MAX_CHILD_ITEMS: usize = 50;
+const MAX_CHILD_ITEMS: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum NodeKey {
-    Body(u64),
-    Faces(u64),
-    Edges(u64),
-    Vertices(u64),
+    Solid(u64),
+    Shell(u64, usize),
+    Face(u64, usize, usize),
 }
 
 #[derive(Debug, Default)]
@@ -108,7 +107,7 @@ struct EntityTreeState {
 
 #[derive(Debug, Clone, Copy)]
 enum RowType {
-    Body { id: u64 },
+    Solid { id: u64 },
     Section,
     Leaf,
 }
@@ -121,12 +120,6 @@ struct Row {
     row_type: RowType,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TopologyCounts {
-    faces: usize,
-    edges: usize,
-    vertices: usize,
-}
 
 struct EntityTree<'a> {
     entities: &'a [crate::scene::SceneEntityInfo],
@@ -141,55 +134,63 @@ impl<'a> EntityTree<'a> {
         let mut rows = Vec::new();
 
         for entity in self.entities {
-            let counts = topology_counts(entity);
-            let body_key = NodeKey::Body(entity.id);
-            let body_expanded = state.expanded.contains(&body_key);
+            let solid = entity_solid(entity);
+            let solid_key = NodeKey::Solid(entity.id);
+            let solid_expanded = state.expanded.contains(&solid_key);
 
             rows.push(Row {
-                label: format!("体 #{} {} (size {:.2})", entity.id, solid_label(entity.kind), entity.size),
+                label: format!(
+                    "Solid #{} {} (size {:.2})",
+                    entity.id,
+                    solid_label(entity.kind),
+                    entity.size
+                ),
                 indent: 0,
-                toggle: Some((body_key, body_expanded)),
-                row_type: RowType::Body { id: entity.id },
+                toggle: Some((solid_key, solid_expanded)),
+                row_type: RowType::Solid { id: entity.id },
             });
 
-            if body_expanded {
-                let faces_key = NodeKey::Faces(entity.id);
-                let faces_expanded = state.expanded.contains(&faces_key);
-                rows.push(Row {
-                    label: format!("面 ({})", counts.faces),
-                    indent: 1,
-                    toggle: Some((faces_key, faces_expanded)),
-                    row_type: RowType::Section,
-                });
+            if solid_expanded {
+                for (shell_index, shell) in solid.boundaries().iter().enumerate() {
+                    let faces_count = shell.face_iter().count();
+                    let edges_count = shell.edge_iter().count();
+                    let shell_key = NodeKey::Shell(entity.id, shell_index);
+                    let shell_expanded = state.expanded.contains(&shell_key);
 
-                if faces_expanded {
-                    rows.extend(build_leaf_rows("面", counts.faces, 2));
-                }
+                    rows.push(Row {
+                        label: format!(
+                            "Shell {} (Face {}, Edge {})",
+                            shell_index + 1,
+                            faces_count,
+                            edges_count
+                        ),
+                        indent: 1,
+                        toggle: Some((shell_key, shell_expanded)),
+                        row_type: RowType::Section,
+                    });
 
-                let edges_key = NodeKey::Edges(entity.id);
-                let edges_expanded = state.expanded.contains(&edges_key);
-                rows.push(Row {
-                    label: format!("线 ({})", counts.edges),
-                    indent: 1,
-                    toggle: Some((edges_key, edges_expanded)),
-                    row_type: RowType::Section,
-                });
+                    if shell_expanded {
+                        for (face_index, face) in shell.face_iter().enumerate() {
+                            let edge_count = face
+                                .boundaries()
+                                .iter()
+                                .map(|wire| wire.edge_iter().count())
+                                .sum::<usize>();
+                            let face_key = NodeKey::Face(entity.id, shell_index, face_index);
+                            let face_expanded = state.expanded.contains(&face_key);
 
-                if edges_expanded {
-                    rows.extend(build_leaf_rows("线", counts.edges, 2));
-                }
+                            rows.push(Row {
+                                label: format!("Face {} (Edge {})", face_index + 1, edge_count),
+                                indent: 2,
+                                toggle: Some((face_key, face_expanded)),
+                                row_type: RowType::Section,
+                            });
 
-                let vertices_key = NodeKey::Vertices(entity.id);
-                let vertices_expanded = state.expanded.contains(&vertices_key);
-                rows.push(Row {
-                    label: format!("点 ({})", counts.vertices),
-                    indent: 1,
-                    toggle: Some((vertices_key, vertices_expanded)),
-                    row_type: RowType::Section,
-                });
-
-                if vertices_expanded {
-                    rows.extend(build_leaf_rows("点", counts.vertices, 2));
+                            if face_expanded {
+                                rows.extend(build_leaf_rows("Edge", edge_count, 3));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -288,7 +289,7 @@ impl<'a> Widget<crate::Message, Theme, iced::Renderer> for EntityTree<'a> {
             };
             renderer.fill_text(label, Point::new(x, y), text_color, *viewport);
 
-            if let RowType::Body { .. } = row.row_type {
+            if let RowType::Solid { .. } = row.row_type {
                 let right = bounds.x + bounds.width - PADDING;
                 let ay = y + (ROW_HEIGHT - ACTION_H) * 0.5;
                 let focus_rect = Rectangle {
@@ -317,7 +318,7 @@ impl<'a> Widget<crate::Message, Theme, iced::Renderer> for EntityTree<'a> {
     fn state(&self) -> widget::tree::State {
         let mut expanded = HashSet::new();
         for entity in self.entities {
-            expanded.insert(NodeKey::Body(entity.id));
+            expanded.insert(NodeKey::Solid(entity.id));
         }
         widget::tree::State::new(EntityTreeState { expanded })
     }
@@ -325,7 +326,7 @@ impl<'a> Widget<crate::Message, Theme, iced::Renderer> for EntityTree<'a> {
     fn diff(&self, tree: &mut widget::Tree) {
         let state = tree.state.downcast_mut::<EntityTreeState>();
         for entity in self.entities {
-            state.expanded.insert(NodeKey::Body(entity.id));
+            state.expanded.insert(NodeKey::Solid(entity.id));
         }
     }
 
@@ -384,7 +385,7 @@ impl<'a> Widget<crate::Message, Theme, iced::Renderer> for EntityTree<'a> {
                 }
             }
 
-            if let RowType::Body { id } = row.row_type {
+            if let RowType::Solid { id } = row.row_type {
                 let right = bounds.x + bounds.width - PADDING;
                 let ay = row_y + (ROW_HEIGHT - ACTION_H) * 0.5;
                 let focus_rect = Rectangle {
@@ -502,38 +503,7 @@ fn solid_label(kind: crate::scene::SolidKind) -> &'static str {
     }
 }
 
-fn topology_counts(entity: &crate::scene::SceneEntityInfo) -> TopologyCounts {
-    let mesh = entity_mesh(entity);
-    let faces = mesh.tri_faces().len() + mesh.quad_faces().len() + mesh.other_faces().len();
-    let vertices = mesh.positions().len();
-
-    let mut edges: HashSet<(u32, u32)> = HashSet::new();
-    for tri in mesh.tri_faces() {
-        let idx = [tri[0].pos as u32, tri[1].pos as u32, tri[2].pos as u32];
-        collect_edges(&idx, &mut edges);
-    }
-    for quad in mesh.quad_faces() {
-        let idx = [
-            quad[0].pos as u32,
-            quad[1].pos as u32,
-            quad[2].pos as u32,
-            quad[3].pos as u32,
-        ];
-        collect_edges(&idx, &mut edges);
-    }
-    for face in mesh.other_faces() {
-        let idx: Vec<u32> = face.iter().map(|v| v.pos as u32).collect();
-        collect_edges(&idx, &mut edges);
-    }
-
-    TopologyCounts {
-        faces,
-        edges: edges.len(),
-        vertices,
-    }
-}
-
-fn entity_mesh(entity: &crate::scene::SceneEntityInfo) -> PolygonMesh {
+fn entity_solid(entity: &crate::scene::SceneEntityInfo) -> Solid {
     let size = entity.size as f64;
     let solid = match entity.kind {
         crate::scene::SolidKind::Box => cad::box_solid(size, size, size),
@@ -542,19 +512,7 @@ fn entity_mesh(entity: &crate::scene::SceneEntityInfo) -> PolygonMesh {
         crate::scene::SolidKind::Cone => cad::cone_solid(size, size * 0.4),
         crate::scene::SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
     };
-    cad::to_mesh(&solid)
-}
-
-fn collect_edges(indices: &[u32], edges: &mut HashSet<(u32, u32)>) {
-    if indices.len() < 2 {
-        return;
-    }
-    for i in 0..indices.len() {
-        let a = indices[i];
-        let b = indices[(i + 1) % indices.len()];
-        let (min, max) = if a < b { (a, b) } else { (b, a) };
-        edges.insert((min, max));
-    }
+    solid
 }
 
 // Draw tab toolbar
