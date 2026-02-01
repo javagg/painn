@@ -2771,6 +2771,7 @@ name = "pain"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.30.10",
  "i_float",
  "i_overlay",
  "iced",

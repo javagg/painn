@@ -2,6 +2,7 @@ use iced::widget::shader::{self, Viewport};
 use iced::{keyboard, mouse, Element, Event, Length, Point, Rectangle};
 use iced::wgpu;
 use wgpu::util::DeviceExt;
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::cad;
 use truck_polymesh::PolygonMesh;
@@ -65,77 +66,6 @@ impl AxesVertex {
     }
 }
 
-#[inline]
-fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0_f32; 4]; 4];
-    for c in 0..4 {
-        for r in 0..4 {
-            out[c][r] = (0..4).map(|k| a[k][r] * b[c][k]).sum();
-        }
-    }
-    out
-}
-
-#[inline]
-fn mat4_identity() -> [[f32; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
-}
-
-#[inline]
-fn mat4_mul_vec4(m: [[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
-    let mut out = [0.0_f32; 4];
-    for r in 0..4 {
-        out[r] = m[0][r] * v[0] + m[1][r] * v[1] + m[2][r] * v[2] + m[3][r] * v[3];
-    }
-    out
-}
-
-type Vec3 = [f32; 3];
-
-#[inline]
-fn vec3_add(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-#[inline]
-fn vec3_sub(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-#[inline]
-fn vec3_mul(a: Vec3, s: f32) -> Vec3 {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-#[inline]
-fn vec3_dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-#[inline]
-fn vec3_cross(a: Vec3, b: Vec3) -> Vec3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-#[inline]
-fn vec3_normalize(v: Vec3) -> Vec3 {
-    let len2 = vec3_dot(v, v);
-    if len2 > 1.0e-12 {
-        let inv = 1.0 / len2.sqrt();
-        vec3_mul(v, inv)
-    } else {
-        [0.0, 0.0, 0.0]
-    }
-}
 
 struct Camera {
     eye: Vec3,
@@ -146,10 +76,6 @@ struct Camera {
     fovy: f32,
     mode: CameraMode,
     ortho_half_h: f32,
-}
-
-fn camera_from_state(state: &SceneState, bounds: Rectangle, mode: CameraMode) -> Camera {
-    camera_from_params(state.target, state.distance, state.yaw, state.pitch, bounds, mode)
 }
 
 fn camera_from_params(
@@ -170,12 +96,12 @@ fn camera_from_params(
     let distance = distance.clamp(0.1, 200.0);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
-    let offset = [distance * cp * sy, distance * sp, distance * cp * cy];
-    let eye = vec3_add(target, offset);
-    let forward = vec3_normalize(vec3_sub(target, eye));
-    let world_up = [0.0, 1.0, 0.0];
-    let right = vec3_normalize(vec3_cross(forward, world_up));
-    let up = vec3_cross(right, forward);
+    let offset = Vec3::new(distance * cp * sy, distance * sp, distance * cp * cy);
+    let eye = target + offset;
+    let forward = (target - eye).normalize_or_zero();
+    let world_up = Vec3::Y;
+    let right = forward.cross(world_up).normalize_or_zero();
+    let up = right.cross(forward);
     let ortho_half_h = match mode {
         CameraMode::Perspective => (0.5 * fovy).tan() * distance,
         CameraMode::Orthographic => distance.max(0.1),
@@ -206,26 +132,19 @@ fn ray_from_cursor(cursor: Point, bounds: Rectangle, camera: &Camera) -> Option<
             let half_h = (0.5 * camera.fovy).tan();
             let half_w = half_h * camera.aspect;
 
-            let dir = vec3_normalize(vec3_add(
-                camera.forward,
-                vec3_add(
-                    vec3_mul(camera.right, x_ndc * half_w),
-                    vec3_mul(camera.up, y_ndc * half_h),
-                ),
-            ));
+            let dir = (camera.forward
+                + camera.right * (x_ndc * half_w)
+                + camera.up * (y_ndc * half_h))
+                .normalize_or_zero();
 
             Some((camera.eye, dir))
         }
         CameraMode::Orthographic => {
             let half_h = camera.ortho_half_h;
             let half_w = half_h * camera.aspect;
-            let origin = vec3_add(
-                camera.eye,
-                vec3_add(
-                    vec3_mul(camera.right, x_ndc * half_w),
-                    vec3_mul(camera.up, y_ndc * half_h),
-                ),
-            );
+            let origin = camera.eye
+                + camera.right * (x_ndc * half_w)
+                + camera.up * (y_ndc * half_h);
             Some((origin, camera.forward))
         }
     }
@@ -233,9 +152,9 @@ fn ray_from_cursor(cursor: Point, bounds: Rectangle, camera: &Camera) -> Option<
 
 fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Option<Vec3> {
     let (num, denom) = match plane {
-        GridPlane::XY => (-origin[2], dir[2]),
-        GridPlane::YZ => (-origin[0], dir[0]),
-        GridPlane::XZ => (-origin[1], dir[1]),
+        GridPlane::XY => (-origin.z, dir.z),
+        GridPlane::YZ => (-origin.x, dir.x),
+        GridPlane::XZ => (-origin.y, dir.y),
     };
 
     if denom.abs() <= 1.0e-6 {
@@ -247,7 +166,7 @@ fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Option<Vec3> {
         return None;
     }
 
-    Some(vec3_add(origin, vec3_mul(dir, t)))
+    Some(origin + dir * t)
 }
 
 fn entity_radius(entity: &SceneEntity) -> f32 {
@@ -260,20 +179,20 @@ fn entity_radius(entity: &SceneEntity) -> f32 {
     }
 }
 
-fn project_point(mvp: [[f32; 4]; 4], bounds: Rectangle, p: Vec3) -> Option<Point> {
-    let clip = mat4_mul_vec4(mvp, [p[0], p[1], p[2], 1.0]);
-    if clip[3].abs() <= 1.0e-6 {
+fn project_point(mvp: Mat4, bounds: Rectangle, p: Vec3) -> Option<Point> {
+    let clip = mvp * Vec4::new(p.x, p.y, p.z, 1.0);
+    if clip.w.abs() <= 1.0e-6 {
         return None;
     }
 
-    let inv_w = 1.0 / clip[3];
-    let ndc = [clip[0] * inv_w, clip[1] * inv_w, clip[2] * inv_w];
-    if ndc[2] < -1.0 || ndc[2] > 1.0 {
+    let inv_w = 1.0 / clip.w;
+    let ndc = Vec3::new(clip.x, clip.y, clip.z) * inv_w;
+    if ndc.z < -1.0 || ndc.z > 1.0 {
         return None;
     }
 
-    let x = (ndc[0] * 0.5 + 0.5) * bounds.width;
-    let y = (1.0 - (ndc[1] * 0.5 + 0.5)) * bounds.height;
+    let x = (ndc.x * 0.5 + 0.5) * bounds.width;
+    let y = (1.0 - (ndc.y * 0.5 + 0.5)) * bounds.height;
     Some(Point { x, y })
 }
 
@@ -283,16 +202,16 @@ fn pick_entity(
     camera: &Camera,
     entities: &[SceneEntity],
 ) -> Option<u64> {
-    let view = mat4_look_at_rh(camera.eye, vec3_add(camera.eye, camera.forward), [0.0, 1.0, 0.0]);
+    let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
     let proj = match camera.mode {
-        CameraMode::Perspective => mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0),
+        CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),
         CameraMode::Orthographic => {
             let half_h = camera.ortho_half_h;
             let half_w = half_h * camera.aspect;
-            mat4_orthographic(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+            Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
         }
     };
-    let mvp = mat4_mul(proj, view);
+    let mvp = proj * view;
 
     let mut best: Option<(u64, f32)> = None;
     for entity in entities {
@@ -306,8 +225,8 @@ fn pick_entity(
 
         let (dist, half_h) = match camera.mode {
             CameraMode::Perspective => {
-                let to_eye = vec3_sub(entity.position, camera.eye);
-                let dist = vec3_dot(to_eye, to_eye).sqrt().max(1.0e-6);
+                let to_eye = entity.position - camera.eye;
+                let dist = to_eye.length().max(1.0e-6);
                 let half_h = (0.5 * camera.fovy).tan() * dist;
                 (dist, half_h)
             }
@@ -330,9 +249,9 @@ fn pick_entity(
 
 fn translate_mesh(mesh: &mut PolygonMesh, offset: Vec3) {
     for p in mesh.positions_mut() {
-        p.x += offset[0] as f64;
-        p.y += offset[1] as f64;
-        p.z += offset[2] as f64;
+        p.x += offset.x as f64;
+        p.y += offset.y as f64;
+        p.z += offset.z as f64;
     }
 }
 
@@ -406,7 +325,7 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
         }
     }
 
-    let mut normal_sums = vec![[0.0_f32; 3]; vertices.len()];
+    let mut normal_sums = vec![Vec3::ZERO; vertices.len()];
     let mesh_normals = mesh.normals();
 
     if has_normals {
@@ -414,9 +333,7 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
             for v in tri.iter() {
                 if let Some(nor) = v.nor {
                     let n = mesh_normals[nor];
-                    normal_sums[v.pos][0] += n.x as f32;
-                    normal_sums[v.pos][1] += n.y as f32;
-                    normal_sums[v.pos][2] += n.z as f32;
+                    normal_sums[v.pos] += Vec3::new(n.x as f32, n.y as f32, n.z as f32);
                 }
             }
         }
@@ -424,9 +341,7 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
             for v in quad.iter() {
                 if let Some(nor) = v.nor {
                     let n = mesh_normals[nor];
-                    normal_sums[v.pos][0] += n.x as f32;
-                    normal_sums[v.pos][1] += n.y as f32;
-                    normal_sums[v.pos][2] += n.z as f32;
+                    normal_sums[v.pos] += Vec3::new(n.x as f32, n.y as f32, n.z as f32);
                 }
             }
         }
@@ -434,9 +349,7 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
             for v in face.iter() {
                 if let Some(nor) = v.nor {
                     let n = mesh_normals[nor];
-                    normal_sums[v.pos][0] += n.x as f32;
-                    normal_sums[v.pos][1] += n.y as f32;
-                    normal_sums[v.pos][2] += n.z as f32;
+                    normal_sums[v.pos] += Vec3::new(n.x as f32, n.y as f32, n.z as f32);
                 }
             }
         }
@@ -446,106 +359,26 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
             let ib = tri[1] as usize;
             let ic = tri[2] as usize;
 
-            let a = vertices[ia].position;
-            let b = vertices[ib].position;
-            let c = vertices[ic].position;
+            let a = Vec3::from_array(vertices[ia].position);
+            let b = Vec3::from_array(vertices[ib].position);
+            let c = Vec3::from_array(vertices[ic].position);
 
-            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = (b - a).cross(c - a);
 
-            let n = [
-                ab[1] * ac[2] - ab[2] * ac[1],
-                ab[2] * ac[0] - ab[0] * ac[2],
-                ab[0] * ac[1] - ab[1] * ac[0],
-            ];
-
-            normal_sums[ia][0] += n[0];
-            normal_sums[ia][1] += n[1];
-            normal_sums[ia][2] += n[2];
-
-            normal_sums[ib][0] += n[0];
-            normal_sums[ib][1] += n[1];
-            normal_sums[ib][2] += n[2];
-
-            normal_sums[ic][0] += n[0];
-            normal_sums[ic][1] += n[1];
-            normal_sums[ic][2] += n[2];
+            normal_sums[ia] += n;
+            normal_sums[ib] += n;
+            normal_sums[ic] += n;
         }
     }
 
     for (v, ns) in vertices.iter_mut().zip(normal_sums.into_iter()) {
-        let len = (ns[0] * ns[0] + ns[1] * ns[1] + ns[2] * ns[2]).sqrt();
-        if len > 1.0e-9 {
-            v.normal = [ns[0] / len, ns[1] / len, ns[2] / len];
-        } else {
+        v.normal = ns.normalize_or_zero().to_array();
+        if v.normal == [0.0, 0.0, 0.0] {
             v.normal = [0.0, 0.0, 1.0];
         }
     }
 
     (vertices, tri_indices)
-}
-
-#[inline]
-fn mat4_perspective(aspect: f32, fovy_radians: f32, z_near: f32, z_far: f32) -> [[f32; 4]; 4] {
-    let aspect = aspect.max(1.0e-6);
-    let f = 1.0 / (0.5 * fovy_radians).tan();
-    let nf = 1.0 / (z_near - z_far);
-
-    // Right-handed, depth range 0..1 (wgpu).
-    [
-        [f / aspect, 0.0, 0.0, 0.0],
-        [0.0, f, 0.0, 0.0],
-        [0.0, 0.0, z_far * nf, -1.0],
-        [0.0, 0.0, (z_near * z_far) * nf, 0.0],
-    ]
-}
-
-fn mat4_orthographic(
-    left: f32,
-    right: f32,
-    bottom: f32,
-    top: f32,
-    z_near: f32,
-    z_far: f32,
-) -> [[f32; 4]; 4] {
-    let rml = right - left;
-    let tmb = top - bottom;
-    let fmn = z_far - z_near;
-
-    if rml.abs() <= 1.0e-6 || tmb.abs() <= 1.0e-6 || fmn.abs() <= 1.0e-6 {
-        return mat4_identity();
-    }
-
-    let tx = -(right + left) / rml;
-    let ty = -(top + bottom) / tmb;
-    let tz = -z_near / fmn;
-
-    [
-        [2.0 / rml, 0.0, 0.0, 0.0],
-        [0.0, 2.0 / tmb, 0.0, 0.0],
-        [0.0, 0.0, -1.0 / fmn, 0.0],
-        [tx, ty, tz, 1.0],
-    ]
-}
-
-#[inline]
-fn mat4_look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> [[f32; 4]; 4] {
-    let f = vec3_normalize(vec3_sub(target, eye));
-    let s = vec3_normalize(vec3_cross(f, up));
-    let u = vec3_cross(s, f);
-
-    // Column-major.
-    let col0 = [s[0], s[1], s[2], 0.0];
-    let col1 = [u[0], u[1], u[2], 0.0];
-    let col2 = [-f[0], -f[1], -f[2], 0.0];
-    let col3 = [
-        -vec3_dot(s, eye),
-        -vec3_dot(u, eye),
-        vec3_dot(f, eye),
-        1.0,
-    ];
-
-    [col0, col1, col2, col3]
 }
 
 fn build_grid_vertices(plane: GridPlane, extent: f32, step: f32) -> Vec<GridVertex> {
@@ -813,7 +646,7 @@ impl From<&SceneEntity> for SceneEntityInfo {
         Self {
             id: e.id,
             kind: e.kind,
-            position: e.position,
+            position: e.position.to_array(),
             size: e.size,
         }
     }
@@ -1056,8 +889,8 @@ fn fs_main() -> @location(0) vec4<f32> {
             });
 
         let initial_uniforms = Uniforms {
-            model_view: mat4_identity(),
-            mvp: mat4_identity(),
+            model_view: Mat4::IDENTITY.to_cols_array_2d(),
+            mvp: Mat4::IDENTITY.to_cols_array_2d(),
         };
         let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_mesh_uniforms"),
@@ -1548,7 +1381,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 #[derive(Debug, Clone)]
 pub struct Primitive {
-    target: [f32; 3],
+    target: Vec3,
     distance: f32,
     yaw: f32,
     pitch: f32,
@@ -1621,26 +1454,25 @@ impl shader::Primitive for Primitive {
             self.camera_mode,
         );
 
-        let view = mat4_look_at_rh(
-            camera.eye,
-            vec3_add(camera.eye, camera.forward),
-            [0.0, 1.0, 0.0],
-        );
+        let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
 
         let proj = match camera.mode {
-            CameraMode::Perspective => mat4_perspective(camera.aspect, camera.fovy, 0.02, 500.0),
+            CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),
             CameraMode::Orthographic => {
                 let half_h = camera.ortho_half_h;
                 let half_w = half_h * camera.aspect;
-                mat4_orthographic(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
             }
         };
 
-        let model = mat4_identity();
-        let model_view = mat4_mul(view, model);
-        let mvp = mat4_mul(proj, model_view);
+        let model = Mat4::IDENTITY;
+        let model_view = view * model;
+        let mvp = proj * model_view;
 
-        let uniforms = Uniforms { model_view, mvp };
+        let uniforms = Uniforms {
+            model_view: model_view.to_cols_array_2d(),
+            mvp: mvp.to_cols_array_2d(),
+        };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
         // Build axes overlay vertices in clip space (-1..1) for a mini viewport.
@@ -1649,8 +1481,8 @@ impl shader::Primitive for Primitive {
         let mut axes_vertices: Vec<AxesVertex> = Vec::with_capacity(32);
 
         let mut add_axis_with_label = |v: Vec3, color: [f32; 3], ch: char| {
-            let x = vec3_dot(v, camera.right);
-            let y = vec3_dot(v, camera.up);
+            let x = v.dot(camera.right);
+            let y = v.dot(camera.up);
             let ex = x * len;
             let ey = y * len;
 
@@ -1699,9 +1531,9 @@ impl shader::Primitive for Primitive {
             }
         };
 
-        add_axis_with_label([1.0, 0.0, 0.0], [0.95, 0.3, 0.3], 'X'); // X - red
-        add_axis_with_label([0.0, 1.0, 0.0], [0.4, 0.9, 0.5], 'Y');   // Y - green
-        add_axis_with_label([0.0, 0.0, 1.0], [0.35, 0.6, 0.95], 'Z'); // Z - blue
+        add_axis_with_label(Vec3::X, [0.95, 0.3, 0.3], 'X'); // X - red
+        add_axis_with_label(Vec3::Y, [0.4, 0.9, 0.5], 'Y');   // Y - green
+        add_axis_with_label(Vec3::Z, [0.35, 0.6, 0.95], 'Z'); // Z - blue
 
         pipeline.axes_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_axes_vertices"),
@@ -1766,8 +1598,8 @@ impl shader::Primitive for Primitive {
                 if pipeline.preview_key != Some(key) {
                     pipeline.preview_key = Some(key);
                     let vertices = [
-                        GridVertex { position: start },
-                        GridVertex { position: end },
+                        GridVertex { position: start.to_array() },
+                        GridVertex { position: end.to_array() },
                     ];
                     pipeline.preview_vertices =
                         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1951,7 +1783,7 @@ pub struct Scene<Message> {
 
 #[derive(Debug, Clone)]
 pub struct SceneState {
-    target: [f32; 3],
+    target: Vec3,
     distance: f32,
     yaw: f32,
     pitch: f32,
@@ -1981,7 +1813,7 @@ enum Dragging {
 impl Default for SceneState {
     fn default() -> Self {
         Self {
-            target: [0.0, 0.0, 0.0],
+            target: Vec3::ZERO,
             distance: 3.0,
             yaw: 0.8,
             pitch: -0.6,
@@ -1992,7 +1824,7 @@ impl Default for SceneState {
             selected: None,
             next_id: 1,
             drag_start: None,
-            drag_offset: [0.0, 0.0, 0.0],
+            drag_offset: Vec3::ZERO,
             modifiers: keyboard::Modifiers::default(),
             sphere_center: None,
             preview_line: None,
@@ -2130,7 +1962,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
                         if let Some(id) = state.selected {
                             if let Some(entity) = state.entities.iter().find(|e| e.id == id) {
-                                state.drag_offset = vec3_sub(entity.position, hit_pos);
+                                state.drag_offset = entity.position - hit_pos;
                             }
                         }
                     }
@@ -2152,9 +1984,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     if let Some(center) = state.sphere_center {
                         if let Some((origin, dir)) = ray_from_cursor(cursor_pos, bounds, &camera) {
                             if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                                let radius = vec3_dot(vec3_sub(hit_pos, center), vec3_sub(hit_pos, center))
-                                    .sqrt()
-                                    .max(0.05);
+                                let radius = (hit_pos - center).length().max(0.05);
                                 let id = state.next_id;
                                 state.next_id += 1;
                                 state.entities.push(SceneEntity {
@@ -2215,7 +2045,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                             if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
                                 if let Some(id) = state.selected {
                                     if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
-                                        entity.position = vec3_add(hit_pos, state.drag_offset);
+                                        entity.position = hit_pos + state.drag_offset;
                                         state.entities_version = state.entities_version.wrapping_add(1);
                                         if let Some(cb) = &self.on_entities_snapshot {
                                             let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
@@ -2236,8 +2066,8 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                             if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
                                 if let Some(id) = state.selected {
                                     if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
-                                        let diff = vec3_sub(hit_pos, start);
-                                        let dist = vec3_dot(diff, diff).sqrt().max(0.1);
+                                        let diff = hit_pos - start;
+                                        let dist = diff.length().max(0.1);
                                         entity.size = dist;
                                         state.entities_version = state.entities_version.wrapping_add(1);
                                         if let Some(cb) = &self.on_entities_snapshot {
@@ -2264,11 +2094,9 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                                 let half_h = camera.ortho_half_h;
                                 let half_w = half_h * camera.aspect;
 
-                                let pan = vec3_add(
-                                    vec3_mul(camera.right, dx_ndc * half_w),
-                                    vec3_mul(camera.up, dy_ndc * half_h),
-                                );
-                                state.target = vec3_add(state.target, pan);
+                                let pan = camera.right * (dx_ndc * half_w)
+                                    + camera.up * (dy_ndc * half_h);
+                                state.target += pan;
                             }
 
                             state.last_cursor = Some(cursor_pos);
