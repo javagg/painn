@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas"] }
+iced = { version = "0.14", features = ["canvas", "advanced"] }
 iced_widget = "0.14"
 iced_wgpu = "0.14"
 iced_aw = { version = "0.13", features = ["full"] }
