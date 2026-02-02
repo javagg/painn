@@ -1,6 +1,6 @@
 use iced::widget::shader::{self, Viewport};
 use iced::{keyboard, mouse, Element, Event, Length, Point, Rectangle};
-use iced::wgpu;
+use wgpu;
 use wgpu::util::DeviceExt;
 use glam::{Mat4, Vec3, Vec4};
 

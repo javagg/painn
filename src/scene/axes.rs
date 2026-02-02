@@ -1,5 +1,5 @@
 use glam::Vec3;
-use iced::wgpu;
+use wgpu;
 
 use crate::camera::Camera;
 

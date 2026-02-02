@@ -3160,6 +3160,7 @@ dependencies = [
  "truck-shapeops",
  "truck-topology",
  "vello",
+ "wgpu",
 ]
 
 [[package]]

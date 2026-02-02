@@ -1,4 +1,4 @@
-use iced::wgpu;
+use wgpu;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
