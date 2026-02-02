@@ -1,3 +1,5 @@
+#[cfg(any())]
+mod legacy {
 use iced::widget::shader::{self, Viewport};
 use iced::{keyboard, mouse, Element, Event, Length, Point, Rectangle};
 use wgpu;
@@ -2073,3 +2075,8 @@ where
         .height(Length::Fill)
         .into()
 }
+
+    }
+
+    mod core;
+    pub use core::*;
