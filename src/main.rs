@@ -1,13 +1,16 @@
 mod drawing;
+#[path = "scene/mod.rs"]
 mod scene;
 mod canvas;
 mod cad;
 mod controls;
+mod camera;
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
 use iced::widget::{column, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 use truck_polymesh::PolygonMesh;
@@ -137,6 +140,7 @@ async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
     Ok(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn path_label(path: &PathBuf) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -159,6 +163,10 @@ struct App {
     scene_axes_enabled: bool,
     scene_axes_size: f32,
     scene_axes_margin: f32,
+    scene_scale_enabled: bool,
+    scene_scale_target_px: f32,
+    scene_scale_height: f32,
+    scene_scale_margin: f32,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -198,6 +206,10 @@ impl App {
             scene_axes_enabled: true,
             scene_axes_size: 100.0,
             scene_axes_margin: 8.0,
+            scene_scale_enabled: true,
+            scene_scale_target_px: 90.0,
+            scene_scale_height: 28.0,
+            scene_scale_margin: 8.0,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -824,6 +836,10 @@ impl App {
             self.scene_axes_enabled,
             self.scene_axes_size,
             self.scene_axes_margin,
+            self.scene_scale_enabled,
+            self.scene_scale_target_px,
+            self.scene_scale_height,
+            self.scene_scale_margin,
             self.scene_zoom_factor,
             self.scene_zoom_version,
             self.gmsh_mesh.clone(),

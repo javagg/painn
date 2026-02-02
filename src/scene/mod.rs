@@ -5,8 +5,16 @@ use wgpu::util::DeviceExt;
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::cad;
+use crate::camera::{camera_from_params, ray_from_cursor, Camera};
 use truck_polymesh::PolygonMesh;
 use std::sync::Arc;
+
+mod axes;
+mod grid;
+mod scale;
+use axes::{build_axes_vertices, create_axes_pipeline, create_empty_axes_buffer};
+use grid::{build_grid_vertices, create_grid_pipeline, GridVertex};
+use scale::{build_scale_vertices, create_scale_pipeline};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -28,127 +36,8 @@ impl Vertex {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GridVertex {
-    position: [f32; 3],
-}
-
-impl GridVertex {
-    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
-
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<GridVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRS,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct AxesVertex {
-    position: [f32; 3],
-    color: [f32; 3],
-}
-
-impl AxesVertex {
-    const ATTRS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<AxesVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRS,
-        }
-    }
-}
-
-
-struct Camera {
-    eye: Vec3,
-    forward: Vec3,
-    right: Vec3,
-    up: Vec3,
-    aspect: f32,
-    fovy: f32,
-    mode: CameraMode,
-    ortho_half_h: f32,
-}
-
-fn camera_from_params(
-    target: Vec3,
-    distance: f32,
-    yaw: f32,
-    pitch: f32,
-    bounds: Rectangle,
-    mode: CameraMode,
-) -> Camera {
-    let aspect = if bounds.height > 1.0 {
-        bounds.width / bounds.height
-    } else {
-        1.0
-    };
-
-    let fovy = 45.0_f32.to_radians();
-    let distance = distance.clamp(0.1, 200.0);
-    let (sy, cy) = yaw.sin_cos();
-    let (sp, cp) = pitch.sin_cos();
-    let offset = Vec3::new(distance * cp * sy, distance * sp, distance * cp * cy);
-    let eye = target + offset;
-    let forward = (target - eye).normalize_or_zero();
-    let world_up = Vec3::Y;
-    let right = forward.cross(world_up).normalize_or_zero();
-    let up = right.cross(forward);
-    let ortho_half_h = match mode {
-        CameraMode::Perspective => (0.5 * fovy).tan() * distance,
-        CameraMode::Orthographic => distance.max(0.1),
-    };
-
-    Camera {
-        eye,
-        forward,
-        right,
-        up,
-        aspect,
-        fovy,
-        mode,
-        ortho_half_h,
-    }
-}
-
-fn ray_from_cursor(cursor: Point, bounds: Rectangle, camera: &Camera) -> Option<(Vec3, Vec3)> {
-    if bounds.width <= 1.0 || bounds.height <= 1.0 {
-        return None;
-    }
-
-    let x_ndc = (cursor.x / bounds.width) * 2.0 - 1.0;
-    let y_ndc = 1.0 - (cursor.y / bounds.height) * 2.0;
-
-    match camera.mode {
-        CameraMode::Perspective => {
-            let half_h = (0.5 * camera.fovy).tan();
-            let half_w = half_h * camera.aspect;
-
-            let dir = (camera.forward
-                + camera.right * (x_ndc * half_w)
-                + camera.up * (y_ndc * half_h))
-                .normalize_or_zero();
-
-            Some((camera.eye, dir))
-        }
-        CameraMode::Orthographic => {
-            let half_h = camera.ortho_half_h;
-            let half_w = half_h * camera.aspect;
-            let origin = camera.eye
-                + camera.right * (x_ndc * half_w)
-                + camera.up * (y_ndc * half_h);
-            Some((origin, camera.forward))
-        }
-    }
-}
+pub use crate::camera::CameraMode;
+pub use grid::GridPlane;
 
 fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Option<Vec3> {
     let (num, denom) = match plane {
@@ -194,6 +83,29 @@ fn project_point(mvp: Mat4, bounds: Rectangle, p: Vec3) -> Option<Point> {
     let x = (ndc.x * 0.5 + 0.5) * bounds.width;
     let y = (1.0 - (ndc.y * 0.5 + 0.5)) * bounds.height;
     Some(Point { x, y })
+}
+
+fn nice_scale_length(px_per_unit: f32, target_px: f32) -> (f32, f32) {
+    if px_per_unit <= 1.0e-5 || target_px <= 1.0e-3 {
+        return (1.0, target_px.max(1.0));
+    }
+
+    let raw_world = target_px / px_per_unit;
+    let power = 10_f32.powf(raw_world.log10().floor());
+    let mut lead = raw_world / power;
+    lead = if lead < 1.5 {
+        1.0
+    } else if lead < 3.5 {
+        2.0
+    } else if lead < 7.5 {
+        5.0
+    } else {
+        10.0
+    };
+
+    let world_len = lead * power;
+    let bar_px = world_len * px_per_unit;
+    (world_len, bar_px)
 }
 
 fn pick_entity(
@@ -447,97 +359,11 @@ fn mesh_to_edge_vertices(mesh: &PolygonMesh) -> Vec<GridVertex> {
     vertices
 }
 
-fn build_grid_vertices(plane: GridPlane, extent: f32, step: f32) -> Vec<GridVertex> {
-    let steps = (extent / step).round() as i32;
-    let mut out = Vec::new();
-
-    for i in -steps..=steps {
-        let v = i as f32 * step;
-        match plane {
-            GridPlane::XY => {
-                out.push(GridVertex {
-                    position: [-extent, v, 0.0],
-                });
-                out.push(GridVertex {
-                    position: [extent, v, 0.0],
-                });
-                out.push(GridVertex {
-                    position: [v, -extent, 0.0],
-                });
-                out.push(GridVertex {
-                    position: [v, extent, 0.0],
-                });
-            }
-            GridPlane::YZ => {
-                out.push(GridVertex {
-                    position: [0.0, -extent, v],
-                });
-                out.push(GridVertex {
-                    position: [0.0, extent, v],
-                });
-                out.push(GridVertex {
-                    position: [0.0, v, -extent],
-                });
-                out.push(GridVertex {
-                    position: [0.0, v, extent],
-                });
-            }
-            GridPlane::XZ => {
-                out.push(GridVertex {
-                    position: [-extent, 0.0, v],
-                });
-                out.push(GridVertex {
-                    position: [extent, 0.0, v],
-                });
-                out.push(GridVertex {
-                    position: [v, 0.0, -extent],
-                });
-                out.push(GridVertex {
-                    position: [v, 0.0, extent],
-                });
-            }
-        }
-    }
-
-    out
-}
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     model_view: [[f32; 4]; 4],
     mvp: [[f32; 4]; 4],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GridPlane {
-    XY,
-    YZ,
-    XZ,
-}
-
-impl GridPlane {
-    pub const ALL: [GridPlane; 3] = [GridPlane::XY, GridPlane::YZ, GridPlane::XZ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            GridPlane::XY => "XY",
-            GridPlane::YZ => "YZ",
-            GridPlane::XZ => "XZ",
-        }
-    }
-}
-
-impl std::fmt::Display for GridPlane {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl Default for GridPlane {
-    fn default() -> Self {
-        GridPlane::XZ
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -611,29 +437,6 @@ fn preset_angles(preset: CameraPreset) -> (f32, f32) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CameraMode {
-    Perspective,
-    Orthographic,
-}
-
-impl CameraMode {
-    pub const ALL: [CameraMode; 2] = [CameraMode::Orthographic, CameraMode::Perspective,];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            CameraMode::Orthographic => "Orthographic",
-            CameraMode::Perspective => "Perspective",
-        }
-    }
-}
-
-impl std::fmt::Display for CameraMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolidKind {
     Box,
     Sphere,
@@ -703,6 +506,7 @@ pub struct SceneEntity {
 pub struct SceneEntityInfo {
     pub id: u64,
     pub kind: SolidKind,
+    #[allow(dead_code)]
     pub position: [f32; 3],
     pub size: f32,
 }
@@ -771,6 +575,11 @@ pub struct Pipeline {
     axes_pipeline: wgpu::RenderPipeline,
     axes_vertices: wgpu::Buffer,
     axes_vertex_count: u32,
+    // Scale overlay
+    scale_pipeline: wgpu::RenderPipeline,
+    scale_vertices: wgpu::Buffer,
+    scale_vertex_count: u32,
+    scale_viewport: (f32, f32),
 }
 
 impl shader::Pipeline for Pipeline {
@@ -831,42 +640,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#
                     .into(),
-            ),
-        });
-
-        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene_grid_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                r#"
-struct Uniforms {
-    model_view: mat4x4<f32>,
-    mvp: mat4x4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> uniforms: Uniforms;
-
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-};
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.55, 0.58, 0.66, 0.55);
-}
-"#
-                .into(),
             ),
         });
 
@@ -1219,45 +992,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
-        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene_grid_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[GridVertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
+        let grid_pipeline = create_grid_pipeline(device, format, &pipeline_layout);
 
         let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_edge_pipeline"),
@@ -1379,82 +1114,13 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
-        // Axes overlay pipeline (no uniforms, colored lines in clip space)
-        let axes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene_axes_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                r#"
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec3<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec3<f32>,
-};
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
-}
-"#
-                    .into(),
-            ),
-        });
-
-        let axes_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene_axes_pipeline_layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
-        let axes_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene_axes_pipeline"),
-            layout: Some(&axes_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &axes_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[AxesVertex::layout()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &axes_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
+        let axes_pipeline = create_axes_pipeline(device, format);
+        let scale_pipeline = create_scale_pipeline(device, format);
+        let scale_vertices = build_scale_vertices();
+        let scale_vertices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_scale_vertices"),
+            contents: bytemuck::cast_slice(&scale_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1521,13 +1187,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             depth_size: (1, 1),
             last_bounds: (0.0, 0.0, 1.0, 1.0),
             axes_pipeline,
-            axes_vertices: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("scene_axes_vertices"),
-                size: 4,
-                usage: wgpu::BufferUsages::VERTEX,
-                mapped_at_creation: false,
-            }),
+            axes_vertices: create_empty_axes_buffer(device),
             axes_vertex_count: 0,
+            scale_pipeline,
+            scale_vertices: scale_vertices_buffer,
+            scale_vertex_count: scale_vertices.len() as u32,
+            scale_viewport: (1.0, 1.0),
         }
     }
 }
@@ -1553,6 +1218,10 @@ pub struct Primitive {
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    scale_enabled: bool,
+    scale_target_px: f32,
+    scale_height: f32,
+    scale_margin: f32,
 }
 
 impl shader::Primitive for Primitive {
@@ -1630,65 +1299,7 @@ impl shader::Primitive for Primitive {
         };
         queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
-        // Build axes overlay vertices in clip space (-1..1) for a mini viewport.
-        // Project world axes onto camera's screen axes using camera.right/up.
-        let len = 0.9_f32;
-        let mut axes_vertices: Vec<AxesVertex> = Vec::with_capacity(32);
-
-        let mut add_axis_with_label = |v: Vec3, color: [f32; 3], ch: char| {
-            let x = v.dot(camera.right);
-            let y = v.dot(camera.up);
-            let ex = x * len;
-            let ey = y * len;
-
-            // Axis line from origin to endpoint in clip space
-            axes_vertices.push(AxesVertex { position: [0.0, 0.0, 0.0], color });
-            axes_vertices.push(AxesVertex { position: [ex, ey, 0.0], color });
-
-            // Label near endpoint, screen-aligned, small size in clip units
-            let mut nx = x;
-            let mut ny = y;
-            let mag = (nx * nx + ny * ny).sqrt();
-            if mag > 1.0e-4 { nx /= mag; ny /= mag; } else { nx = 1.0; ny = 0.0; }
-            let pad = 0.08_f32; // clip units (~8px at 100px viewport)
-            let px = ex + nx * pad;
-            let py = ey + ny * pad;
-            let s = 0.12_f32; // glyph half-size in clip units
-
-            match ch {
-                'X' => {
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
-                }
-                'Y' => {
-                    // upper-left to center, upper-right to center, center to bottom
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py - s, 0.0], color });
-                }
-                'Z' => {
-                    // top horizontal
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    // diagonal
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    // bottom horizontal
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
-                }
-                _ => {}
-            }
-        };
-
-        add_axis_with_label(Vec3::X, [0.95, 0.3, 0.3], 'X'); // X - red
-        add_axis_with_label(Vec3::Y, [0.4, 0.9, 0.5], 'Y');   // Y - green
-        add_axis_with_label(Vec3::Z, [0.35, 0.6, 0.95], 'Z'); // Z - blue
+        let axes_vertices = build_axes_vertices(&camera);
 
         pipeline.axes_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("scene_axes_vertices"),
@@ -1696,6 +1307,21 @@ impl shader::Primitive for Primitive {
             usage: wgpu::BufferUsages::VERTEX,
         });
         pipeline.axes_vertex_count = axes_vertices.len() as u32;
+
+        let target_px = self.scale_target_px.clamp(40.0, 240.0);
+        let px_per_unit = match (
+            project_point(mvp, *bounds, self.target),
+            project_point(mvp, *bounds, self.target + camera.right),
+        ) {
+            (Some(a), Some(b)) => (b.x - a.x).hypot(b.y - a.y),
+            _ => 0.0,
+        };
+        let (_, bar_px) = nice_scale_length(px_per_unit, target_px);
+        let bar_px = bar_px.clamp(30.0, 260.0);
+        let bar_rel = 0.8_f32;
+        let vw = (bar_px / bar_rel).max(30.0);
+        let vh = self.scale_height.clamp(18.0, 80.0);
+        pipeline.scale_viewport = (vw, vh);
 
         let grid_key = GridKey {
             enabled: self.show_grid,
@@ -1937,6 +1563,24 @@ impl shader::Primitive for Primitive {
             // Restore full viewport for any further draws (not strictly needed here)
             render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
         }
+
+        // Draw scale bar overlay at bottom-left corner
+        if self.scale_enabled && pipeline.scale_vertex_count > 0 {
+            let margin = self.scale_margin.max(0.0);
+            let (bx, by, bw, bh) = pipeline.last_bounds;
+            let (vw_raw, vh_raw) = pipeline.scale_viewport;
+            let vw = vw_raw.min(bw);
+            let vh = vh_raw.min(bh);
+            let vx = (bx + margin).min(bx + bw - vw).max(bx);
+            let vy = (by + bh - vh - margin).max(by);
+
+            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            render_pass.set_pipeline(&pipeline.scale_pipeline);
+            render_pass.set_vertex_buffer(0, pipeline.scale_vertices.slice(..));
+            render_pass.draw(0..pipeline.scale_vertex_count, 0..1);
+
+            render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
+        }
     }
 }
 
@@ -1952,6 +1596,10 @@ pub struct Scene<Message> {
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    scale_enabled: bool,
+    scale_target_px: f32,
+    scale_height: f32,
+    scale_margin: f32,
     zoom_request_factor: f32,
     zoom_request_version: u64,
     external_mesh: Option<Arc<PolygonMesh>>,
@@ -2349,6 +1997,10 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             axes_enabled: self.axes_enabled,
             axes_size: self.axes_size,
             axes_margin: self.axes_margin,
+            scale_enabled: self.scale_enabled,
+            scale_target_px: self.scale_target_px,
+            scale_height: self.scale_height,
+            scale_margin: self.scale_margin,
         }
     }
 
@@ -2379,6 +2031,10 @@ pub fn widget<'a, Message>(
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    scale_enabled: bool,
+    scale_target_px: f32,
+    scale_height: f32,
+    scale_margin: f32,
     zoom_request_factor: f32,
     zoom_request_version: u64,
     external_mesh: Option<Arc<PolygonMesh>>,
@@ -2401,6 +2057,10 @@ where
         axes_enabled,
         axes_size,
         axes_margin,
+        scale_enabled,
+        scale_target_px,
+        scale_height,
+        scale_margin,
         zoom_request_factor,
         zoom_request_version,
         external_mesh,
@@ -2413,4 +2073,3 @@ where
         .height(Length::Fill)
         .into()
 }
-

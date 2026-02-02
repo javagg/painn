@@ -1,7 +1,8 @@
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use truck_meshalgo::prelude::*;
 use truck_modeling::*;
 use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
-use truck_polymesh::obj::read;
 use meshx::mesh::TetMesh;
 #[cfg(not(target_arch = "wasm32"))]
 use meshx::io::msh::{self, ElementType};
@@ -10,11 +11,6 @@ use mshio::{self as msh, ElementType};
 use std::collections::HashMap;
 use std::path::Path;
 use std::f64::consts::PI;
-
-pub fn load_obj() -> PolygonMesh {
-      let polygon = read(include_bytes!("teapot.obj").as_ref()).unwrap();
-    return polygon;
-}
 
 pub fn to_mesh(solid: &Solid) -> PolygonMesh {
     let mesh_with_topology = solid.triangulation(0.01);
