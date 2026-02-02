@@ -1,0 +1,419 @@
+use glam::{Mat4, Vec3};
+use wgpu::util::DeviceExt;
+
+use crate::scene::{
+    build_grid_vertices, build_scene_mesh, camera_from_params, mesh_to_vertex_index, AxesVertex,
+    GridPlane, GridVertex, SceneRect, SceneView, Uniforms,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GridKey {
+    enabled: bool,
+    plane: GridPlane,
+    extent: f32,
+    step: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PreviewKey {
+    start: Vec3,
+    end: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HighlightKey {
+    id: u64,
+    position: Vec3,
+    size: f32,
+}
+
+#[derive(Debug)]
+pub struct Pipeline {
+    pub(crate) pipeline: wgpu::RenderPipeline,
+    pub(crate) vertices: wgpu::Buffer,
+    pub(crate) indices: wgpu::Buffer,
+    pub(crate) index_count: u32,
+    pub(crate) grid_pipeline: wgpu::RenderPipeline,
+    pub(crate) grid_vertices: wgpu::Buffer,
+    pub(crate) grid_vertex_count: u32,
+    pub(crate) grid_key: Option<GridKey>,
+    pub(crate) preview_pipeline: wgpu::RenderPipeline,
+    pub(crate) preview_vertices: wgpu::Buffer,
+    pub(crate) preview_vertex_count: u32,
+    pub(crate) preview_key: Option<PreviewKey>,
+    pub(crate) preview_version: u64,
+    pub(crate) highlight_pipeline: wgpu::RenderPipeline,
+    pub(crate) highlight_vertices: wgpu::Buffer,
+    pub(crate) highlight_vertex_count: u32,
+    pub(crate) highlight_key: Option<HighlightKey>,
+    pub(crate) entities_version: u64,
+    pub(crate) uniforms: wgpu::Buffer,
+    pub(crate) bind_group: wgpu::BindGroup,
+    pub(crate) depth: wgpu::TextureView,
+    pub(crate) depth_size: (u32, u32),
+    pub(crate) last_bounds: (f32, f32, f32, f32),
+    // Axes overlay
+    pub(crate) axes_pipeline: wgpu::RenderPipeline,
+    pub(crate) axes_vertices: wgpu::Buffer,
+    pub(crate) axes_vertex_count: u32,
+}
+
+impl SceneView {
+    pub fn do_prepare(
+        &self,
+        pipeline: &mut Pipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bounds: SceneRect,
+        physical_size: (u32, u32),
+        scale_factor: f32,
+    ) {
+        // Ensure the depth buffer matches the swapchain (frame) size.
+        let target_w = physical_size.0.max(1);
+        let target_h = physical_size.1.max(1);
+
+        if pipeline.depth_size != (target_w, target_h) {
+            let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene_depth"),
+                size: wgpu::Extent3d {
+                    width: target_w,
+                    height: target_h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24Plus,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            pipeline.depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            pipeline.depth_size = (target_w, target_h);
+        }
+
+        // Store the widget bounds in physical pixels so we can set the viewport in `render`.
+        pipeline.last_bounds = (
+            bounds.x * scale_factor,
+            bounds.y * scale_factor,
+            (bounds.width * scale_factor).max(1.0),
+            (bounds.height * scale_factor).max(1.0),
+        );
+
+        // CAD-like orbit camera around a target point.
+        let camera = camera_from_params(
+            self.target,
+            self.distance,
+            self.yaw,
+            self.pitch,
+            bounds,
+            self.camera_mode,
+        );
+
+        let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
+
+        let proj = match camera.mode {
+            crate::scene::CameraMode::Perspective => {
+                Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0)
+            }
+            crate::scene::CameraMode::Orthographic => {
+                let half_h = camera.ortho_half_h;
+                let half_w = half_h * camera.aspect;
+                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+            }
+        };
+
+        let model = Mat4::IDENTITY;
+        let model_view = view * model;
+        let mvp = proj * model_view;
+
+        let uniforms = Uniforms {
+            model_view: model_view.to_cols_array_2d(),
+            mvp: mvp.to_cols_array_2d(),
+        };
+        queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
+
+        // Build axes overlay vertices in clip space (-1..1) for a mini viewport.
+        // Project world axes onto camera's screen axes using camera.right/up.
+        let len = 0.9_f32;
+        let mut axes_vertices: Vec<AxesVertex> = Vec::with_capacity(32);
+
+        let mut add_axis_with_label = |v: Vec3, color: [f32; 3], ch: char| {
+            let x = v.dot(camera.right);
+            let y = v.dot(camera.up);
+            let ex = x * len;
+            let ey = y * len;
+
+            // Axis line from origin to endpoint in clip space
+            axes_vertices.push(AxesVertex { position: [0.0, 0.0, 0.0], color });
+            axes_vertices.push(AxesVertex { position: [ex, ey, 0.0], color });
+
+            // Label near endpoint, screen-aligned, small size in clip units
+            let mut nx = x;
+            let mut ny = y;
+            let mag = (nx * nx + ny * ny).sqrt();
+            if mag > 1.0e-4 {
+                nx /= mag;
+                ny /= mag;
+            } else {
+                nx = 1.0;
+                ny = 0.0;
+            }
+            let pad = 0.08_f32; // clip units (~8px at 100px viewport)
+            let px = ex + nx * pad;
+            let py = ey + ny * pad;
+            let s = 0.12_f32; // glyph half-size in clip units
+
+            match ch {
+                'X' => {
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
+                }
+                'Y' => {
+                    // upper-left to center, upper-right to center, center to bottom
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px,     py - s, 0.0], color });
+                }
+                'Z' => {
+                    // top horizontal
+                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    // diagonal
+                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    // bottom horizontal
+                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
+                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
+                }
+                _ => {}
+            }
+        };
+
+        add_axis_with_label(Vec3::X, [0.95, 0.3, 0.3], 'X'); // X - red
+        add_axis_with_label(Vec3::Y, [0.4, 0.9, 0.5], 'Y');   // Y - green
+        add_axis_with_label(Vec3::Z, [0.35, 0.6, 0.95], 'Z'); // Z - blue
+
+        pipeline.axes_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_axes_vertices"),
+            contents: bytemuck::cast_slice(&axes_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        pipeline.axes_vertex_count = axes_vertices.len() as u32;
+
+        let grid_key = GridKey {
+            enabled: self.show_grid,
+            plane: self.grid_plane,
+            extent: self.grid_extent,
+            step: self.grid_step,
+        };
+        if pipeline.grid_key != Some(grid_key) {
+            pipeline.grid_key = Some(grid_key);
+            if !self.show_grid {
+                pipeline.grid_vertex_count = 0;
+            } else {
+                let extent = self.grid_extent.max(0.5);
+                let step = self.grid_step.max(0.05);
+                let vertices = build_grid_vertices(self.grid_plane, extent, step);
+
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_grid_vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                pipeline.grid_vertices = buffer;
+                pipeline.grid_vertex_count = vertices.len() as u32;
+            }
+        }
+
+        if pipeline.entities_version != self.entities_version {
+            pipeline.entities_version = self.entities_version;
+
+            if let Some(mesh) = build_scene_mesh(self.entities.as_slice()) {
+                let (vertices, indices) = mesh_to_vertex_index(&mesh);
+
+                pipeline.vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_mesh_vertices"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                pipeline.indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_mesh_indices"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                pipeline.index_count = indices.len() as u32;
+            } else {
+                pipeline.index_count = 0;
+            }
+        }
+
+        if pipeline.preview_version != self.preview_version {
+            pipeline.preview_version = self.preview_version;
+            if let Some((start, end)) = self.preview_line {
+                let key = PreviewKey { start, end };
+                if pipeline.preview_key != Some(key) {
+                    pipeline.preview_key = Some(key);
+                    let vertices = [
+                        GridVertex { position: start.to_array() },
+                        GridVertex { position: end.to_array() },
+                    ];
+                    pipeline.preview_vertices =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("scene_preview_vertices"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                    pipeline.preview_vertex_count = 2;
+                }
+            } else {
+                pipeline.preview_key = None;
+                pipeline.preview_vertex_count = 0;
+            }
+        }
+
+        let highlight_key = self.selected.and_then(|id| {
+            self.entities
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| HighlightKey {
+                    id: e.id,
+                    position: e.position,
+                    size: e.size,
+                })
+        });
+
+        if pipeline.highlight_key != highlight_key {
+            pipeline.highlight_key = highlight_key;
+            if let Some(key) = highlight_key {
+                let s = (key.size * 0.6).max(0.05);
+                let p = key.position;
+                let vertices = [
+                    GridVertex {
+                        position: [p[0] - s, p[1], p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0] + s, p[1], p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1] - s, p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1] + s, p[2]],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1], p[2] - s],
+                    },
+                    GridVertex {
+                        position: [p[0], p[1], p[2] + s],
+                    },
+                ];
+
+                pipeline.highlight_vertices =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("scene_highlight_vertices"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                pipeline.highlight_vertex_count = vertices.len() as u32;
+            } else {
+                pipeline.highlight_vertex_count = 0;
+            }
+        }
+    }
+
+    pub fn do_render(
+        &self,
+        pipeline: &Pipeline,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        clip_bounds: &iced::Rectangle<u32>,
+    ) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("scene_mesh_depth_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipeline.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        let (bx, by, bw, bh) = pipeline.last_bounds;
+        render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
+        render_pass.set_scissor_rect(
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width,
+            clip_bounds.height,
+        );
+
+        if pipeline.grid_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.grid_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.grid_vertices.slice(..));
+            render_pass.draw(0..pipeline.grid_vertex_count, 0..1);
+        }
+
+        if pipeline.preview_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.preview_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.preview_vertices.slice(..));
+            render_pass.draw(0..pipeline.preview_vertex_count, 0..1);
+        }
+
+        if pipeline.highlight_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.highlight_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.highlight_vertices.slice(..));
+            render_pass.draw(0..pipeline.highlight_vertex_count, 0..1);
+        }
+
+        render_pass.set_pipeline(&pipeline.pipeline);
+        render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
+        render_pass.set_index_buffer(pipeline.indices.slice(..), wgpu::IndexFormat::Uint32);
+        if pipeline.index_count > 0 {
+            render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
+        }
+
+        // Draw axes overlay at bottom-right corner
+        if self.axes_enabled && pipeline.axes_vertex_count > 0 {
+            let size = self.axes_size.max(24.0); // pixels
+            let margin = self.axes_margin.max(0.0);
+            let (bx, by, bw, bh) = pipeline.last_bounds;
+            let vx = (bx + bw - size - margin).max(bx);
+            let vy = (by + bh - size - margin).max(by);
+            let vw = size.min(bw);
+            let vh = size.min(bh);
+
+            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            // Keep scissor as widget clip
+            render_pass.set_pipeline(&pipeline.axes_pipeline);
+            render_pass.set_vertex_buffer(0, pipeline.axes_vertices.slice(..));
+            render_pass.draw(0..pipeline.axes_vertex_count, 0..1);
+
+            // Restore full viewport for any further draws (not strictly needed here)
+            render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
+        }
+    }
+}

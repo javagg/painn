@@ -8,18 +8,17 @@ use iced::advanced::{
     layout, mouse, renderer, text as advanced_text, widget, Clipboard, Layout, Shell, Widget,
     Renderer as AdvancedRenderer,
 };
-use iced::advanced::text::Renderer as TextRenderer;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use std::collections::HashSet;
-use std::sync::Arc;
 use truck_modeling::Solid;
 use wgpu::util::DeviceExt;
+use iced::advanced::text::Renderer as _;
 
 use crate::cad;
 use crate::scene::{
-    build_grid_vertices, build_scene_mesh, camera_from_params, intersect_plane, mesh_to_vertex_index,
-    pick_entity, ray_from_cursor, AxesVertex, CameraMode, CameraPreset, GridPlane, GridVertex,
-    SceneEntity, SceneEntityInfo, ScenePoint, SceneRect, SceneTool, SolidKind, Uniforms, Vertex,
+    AxesVertex, CameraMode, CameraPreset, GridPlane, GridVertex, Pipeline, SceneConfig,
+    SceneEntityInfo, SceneInput, SceneModel, ScenePoint, SceneRect, SceneRequests, SceneTool,
+    SceneUpdateResult, SceneView, SolidKind, Uniforms, Vertex,
 };
 use iced_aw::menu;
 
@@ -31,45 +30,105 @@ pub fn build_menu_bar<'a>(_app: &crate::App) -> Element<'a, crate::Message> {
             button(text("New").size(14)).width(Length::Shrink).on_press(crate::Message::Clear),
         ),
         menu::Item::new(
-            button(text("Open...").size(14)).width(Length::Shrink).on_press(crate::Message::OpenFile),
+            button(text("Open...").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::OpenFile),
         ),
         menu::Item::new(
-            button(text("Save").size(14)).width(Length::Shrink).on_press(crate::Message::SaveFile),
+            button(text("Save").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::SaveFile),
         ),
         menu::Item::new(
-            button(text("Save As...").size(14)).width(Length::Shrink).on_press(crate::Message::SaveFileAs),
+            button(text("Save As...").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::SaveFileAs),
         ),
         menu::Item::new(
-            button(text("Quit").size(14)).width(Length::Shrink).on_press(crate::Message::Quit),
+            button(text("Quit").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Quit),
         ),
     ]);
     let file_menu = menu::Item::with_menu(text("File").size(14), file_sub);
 
     // Edit submenu
     let edit_sub = menu::Menu::new(vec![
-        menu::Item::new(button(text("Undo").size(14)).width(Length::Shrink).on_press(crate::Message::Undo)),
-        menu::Item::new(button(text("Redo").size(14)).width(Length::Shrink).on_press(crate::Message::Redo)),
-        menu::Item::new(button(text("Cut").size(14)).width(Length::Shrink).on_press(crate::Message::Cut)),
-        menu::Item::new(button(text("Copy").size(14)).width(Length::Shrink).on_press(crate::Message::Copy)),
-        menu::Item::new(button(text("Paste").size(14)).width(Length::Shrink).on_press(crate::Message::Paste)),
-        menu::Item::new(button(text("Delete Selected").size(14)).width(Length::Shrink).on_press(crate::Message::DeleteSelected)),
-        menu::Item::new(button(text("Clear").size(14)).width(Length::Shrink).on_press(crate::Message::Clear)),
+        menu::Item::new(
+            button(text("Undo").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Undo),
+        ),
+        menu::Item::new(
+            button(text("Redo").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Redo),
+        ),
+        menu::Item::new(
+            button(text("Cut").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Cut),
+        ),
+        menu::Item::new(
+            button(text("Copy").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Copy),
+        ),
+        menu::Item::new(
+            button(text("Paste").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Paste),
+        ),
+        menu::Item::new(
+            button(text("Delete Selected").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::DeleteSelected),
+        ),
+        menu::Item::new(
+            button(text("Clear").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::Clear),
+        ),
     ]);
     let edit_menu = menu::Item::with_menu(text("Edit").size(14), edit_sub);
 
     // View submenu
     let view_sub = menu::Menu::new(vec![
-        menu::Item::new(button(text("Toggle 2D Grid").size(14)).width(Length::Shrink).on_press(crate::Message::ToggleGrid)),
-        menu::Item::new(button(text("Reset Zoom").size(14)).width(Length::Shrink).on_press(crate::Message::ResetZoom)),
-        menu::Item::new(button(text("Toggle Scene Grid").size(14)).width(Length::Shrink).on_press(crate::Message::SceneGridToggle)),
-        menu::Item::new(button(text("Toggle Axes").size(14)).width(Length::Shrink).on_press(crate::Message::SceneAxesToggle)),
-        menu::Item::new(button(text("Clear Camera Align").size(14)).width(Length::Shrink).on_press(crate::Message::SceneCameraPresetCleared)),
+        menu::Item::new(
+            button(text("Toggle 2D Grid").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::ToggleGrid),
+        ),
+        menu::Item::new(
+            button(text("Reset Zoom").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::ResetZoom),
+        ),
+        menu::Item::new(
+            button(text("Toggle Scene Grid").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::SceneGridToggle),
+        ),
+        menu::Item::new(
+            button(text("Toggle Axes").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::SceneAxesToggle),
+        ),
+        menu::Item::new(
+            button(text("Clear Camera Align").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::SceneCameraPresetCleared),
+        ),
     ]);
     let view_menu = menu::Item::with_menu(text("View").size(14), view_sub);
 
     // Help submenu
     let help_sub = menu::Menu::new(vec![
-        menu::Item::new(button(text("About").size(14)).width(Length::Shrink).on_press(crate::Message::About)),
+        menu::Item::new(
+            button(text("About").size(14))
+                .width(Length::Shrink)
+                .on_press(crate::Message::About),
+        ),
     ]);
     let help_menu = menu::Item::with_menu(text("Help").size(14), help_sub);
 
@@ -77,7 +136,11 @@ pub fn build_menu_bar<'a>(_app: &crate::App) -> Element<'a, crate::Message> {
 }
 
 // Tab button builder
-pub fn tab_button<'a>(label: &'a str, tab: crate::Tab, active: crate::Tab) -> iced::widget::Button<'a, crate::Message> {
+pub fn tab_button<'a>(
+    label: &'a str,
+    tab: crate::Tab,
+    active: crate::Tab,
+) -> iced::widget::Button<'a, crate::Message> {
     if tab == active {
         button(text(format!("● {label}"))).on_press_maybe(None)
     } else {
@@ -86,9 +149,7 @@ pub fn tab_button<'a>(label: &'a str, tab: crate::Tab, active: crate::Tab) -> ic
 }
 
 // Scene sidebar: entity list with actions
-pub fn build_scene_sidebar<'a>(
-    entities: &'a [crate::scene::SceneEntityInfo],
-) -> Element<'a, crate::Message> {
+pub fn build_scene_sidebar<'a>(entities: &'a [SceneEntityInfo]) -> Element<'a, crate::Message> {
     let tree = EntityTree::new(entities);
     container(scrollable(tree))
         .width(Length::Fixed(360.0))
@@ -132,13 +193,12 @@ struct Row {
     row_type: RowType,
 }
 
-
 struct EntityTree<'a> {
-    entities: &'a [crate::scene::SceneEntityInfo],
+    entities: &'a [SceneEntityInfo],
 }
 
 impl<'a> EntityTree<'a> {
-    fn new(entities: &'a [crate::scene::SceneEntityInfo]) -> Self {
+    fn new(entities: &'a [SceneEntityInfo]) -> Self {
         Self { entities }
     }
 
@@ -279,12 +339,7 @@ impl<'a> Widget<crate::Message, Theme, iced::Renderer> for EntityTree<'a> {
                     shaping: advanced_text::Shaping::Auto,
                     wrapping: advanced_text::Wrapping::None,
                 };
-                renderer.fill_text(
-                    toggle,
-                    Point::new(x, y),
-                    text_color,
-                    *viewport,
-                );
+                renderer.fill_text(toggle, Point::new(x, y), text_color, *viewport);
                 x += TOGGLE_SIZE + 4.0;
             }
 
@@ -505,24 +560,24 @@ fn build_leaf_rows(label: &str, total: usize, indent: u16) -> Vec<Row> {
     rows
 }
 
-fn solid_label(kind: crate::scene::SolidKind) -> &'static str {
+fn solid_label(kind: SolidKind) -> &'static str {
     match kind {
-        crate::scene::SolidKind::Box => "Box",
-        crate::scene::SolidKind::Sphere => "Sphere",
-        crate::scene::SolidKind::Cylinder => "Cylinder",
-        crate::scene::SolidKind::Cone => "Cone",
-        crate::scene::SolidKind::Torus => "Torus",
+        SolidKind::Box => "Box",
+        SolidKind::Sphere => "Sphere",
+        SolidKind::Cylinder => "Cylinder",
+        SolidKind::Cone => "Cone",
+        SolidKind::Torus => "Torus",
     }
 }
 
-fn entity_solid(entity: &crate::scene::SceneEntityInfo) -> Solid {
+fn entity_solid(entity: &SceneEntityInfo) -> Solid {
     let size = entity.size as f64;
     let solid = match entity.kind {
-        crate::scene::SolidKind::Box => cad::box_solid(size, size, size),
-        crate::scene::SolidKind::Sphere => cad::sphere(size * 0.5),
-        crate::scene::SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
-        crate::scene::SolidKind::Cone => cad::cone_solid(size, size * 0.4),
-        crate::scene::SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
+        SolidKind::Box => cad::box_solid(size, size, size),
+        SolidKind::Sphere => cad::sphere(size * 0.5),
+        SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
+        SolidKind::Cone => cad::cone_solid(size, size * 0.4),
+        SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
     };
     solid
 }
@@ -533,58 +588,6 @@ fn to_scene_point(p: Point) -> ScenePoint {
 
 fn to_scene_rect(r: Rectangle) -> SceneRect {
     SceneRect::new(r.x, r.y, r.width, r.height)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct GridKey {
-    enabled: bool,
-    plane: GridPlane,
-    extent: f32,
-    step: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PreviewKey {
-    start: Vec3,
-    end: Vec3,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct HighlightKey {
-    id: u64,
-    position: Vec3,
-    size: f32,
-}
-
-#[derive(Debug)]
-pub struct Pipeline {
-    pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
-    index_count: u32,
-    grid_pipeline: wgpu::RenderPipeline,
-    grid_vertices: wgpu::Buffer,
-    grid_vertex_count: u32,
-    grid_key: Option<GridKey>,
-    preview_pipeline: wgpu::RenderPipeline,
-    preview_vertices: wgpu::Buffer,
-    preview_vertex_count: u32,
-    preview_key: Option<PreviewKey>,
-    preview_version: u64,
-    highlight_pipeline: wgpu::RenderPipeline,
-    highlight_vertices: wgpu::Buffer,
-    highlight_vertex_count: u32,
-    highlight_key: Option<HighlightKey>,
-    entities_version: u64,
-    uniforms: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    depth: wgpu::TextureView,
-    depth_size: (u32, u32),
-    last_bounds: (f32, f32, f32, f32),
-    // Axes overlay
-    axes_pipeline: wgpu::RenderPipeline,
-    axes_vertices: wgpu::Buffer,
-    axes_vertex_count: u32,
 }
 
 impl shader::Pipeline for Pipeline {
@@ -1115,23 +1118,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 #[derive(Debug, Clone)]
 pub struct Primitive {
-    target: Vec3,
-    distance: f32,
-    yaw: f32,
-    pitch: f32,
-    camera_mode: CameraMode,
-    show_grid: bool,
-    grid_plane: GridPlane,
-    grid_extent: f32,
-    grid_step: f32,
-    entities: Arc<Vec<SceneEntity>>,
-    entities_version: u64,
-    preview_line: Option<(Vec3, Vec3)>,
-    preview_version: u64,
-    selected: Option<u64>,
-    axes_enabled: bool,
-    axes_size: f32,
-    axes_margin: f32,
+    view: SceneView,
 }
 
 impl shader::Primitive for Primitive {
@@ -1145,260 +1132,17 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         viewport: &Viewport,
     ) {
-        // Ensure the depth buffer matches the swapchain (frame) size.
-        let physical = viewport.physical_size();
-        let target_w = physical.width.max(1);
-        let target_h = physical.height.max(1);
-
-        if pipeline.depth_size != (target_w, target_h) {
-            let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("scene_depth"),
-                size: wgpu::Extent3d {
-                    width: target_w,
-                    height: target_h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth24Plus,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            pipeline.depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            pipeline.depth_size = (target_w, target_h);
-        }
-
-        // Store the widget bounds in physical pixels so we can set the viewport in `render`.
-        let scale = viewport.scale_factor();
-        pipeline.last_bounds = (
-            bounds.x * scale,
-            bounds.y * scale,
-            (bounds.width * scale).max(1.0),
-            (bounds.height * scale).max(1.0),
+        self.view.do_prepare(
+            pipeline,
+            device,
+            queue,
+            to_scene_rect(*bounds),
+            {
+                let size = viewport.physical_size();
+                (size.width, size.height)
+            },
+            viewport.scale_factor(),
         );
-
-        let scene_bounds = to_scene_rect(*bounds);
-
-        // CAD-like orbit camera around a target point.
-        let camera = camera_from_params(
-            self.target,
-            self.distance,
-            self.yaw,
-            self.pitch,
-            scene_bounds,
-            self.camera_mode,
-        );
-
-        let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
-
-        let proj = match camera.mode {
-            CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),
-            CameraMode::Orthographic => {
-                let half_h = camera.ortho_half_h;
-                let half_w = half_h * camera.aspect;
-                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
-            }
-        };
-
-        let model = Mat4::IDENTITY;
-        let model_view = view * model;
-        let mvp = proj * model_view;
-
-        let uniforms = Uniforms {
-            model_view: model_view.to_cols_array_2d(),
-            mvp: mvp.to_cols_array_2d(),
-        };
-        queue.write_buffer(&pipeline.uniforms, 0, bytemuck::bytes_of(&uniforms));
-
-        // Build axes overlay vertices in clip space (-1..1) for a mini viewport.
-        // Project world axes onto camera's screen axes using camera.right/up.
-        let len = 0.9_f32;
-        let mut axes_vertices: Vec<AxesVertex> = Vec::with_capacity(32);
-
-        let mut add_axis_with_label = |v: Vec3, color: [f32; 3], ch: char| {
-            let x = v.dot(camera.right);
-            let y = v.dot(camera.up);
-            let ex = x * len;
-            let ey = y * len;
-
-            // Axis line from origin to endpoint in clip space
-            axes_vertices.push(AxesVertex { position: [0.0, 0.0, 0.0], color });
-            axes_vertices.push(AxesVertex { position: [ex, ey, 0.0], color });
-
-            // Label near endpoint, screen-aligned, small size in clip units
-            let mut nx = x;
-            let mut ny = y;
-            let mag = (nx * nx + ny * ny).sqrt();
-            if mag > 1.0e-4 { nx /= mag; ny /= mag; } else { nx = 1.0; ny = 0.0; }
-            let pad = 0.08_f32; // clip units (~8px at 100px viewport)
-            let px = ex + nx * pad;
-            let py = ey + ny * pad;
-            let s = 0.12_f32; // glyph half-size in clip units
-
-            match ch {
-                'X' => {
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
-                }
-                'Y' => {
-                    // upper-left to center, upper-right to center, center to bottom
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py,     0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px,     py - s, 0.0], color });
-                }
-                'Z' => {
-                    // top horizontal
-                    axes_vertices.push(AxesVertex { position: [px - s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    // diagonal
-                    axes_vertices.push(AxesVertex { position: [px + s, py + s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    // bottom horizontal
-                    axes_vertices.push(AxesVertex { position: [px - s, py - s, 0.0], color });
-                    axes_vertices.push(AxesVertex { position: [px + s, py - s, 0.0], color });
-                }
-                _ => {}
-            }
-        };
-
-        add_axis_with_label(Vec3::X, [0.95, 0.3, 0.3], 'X'); // X - red
-        add_axis_with_label(Vec3::Y, [0.4, 0.9, 0.5], 'Y');   // Y - green
-        add_axis_with_label(Vec3::Z, [0.35, 0.6, 0.95], 'Z'); // Z - blue
-
-        pipeline.axes_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene_axes_vertices"),
-            contents: bytemuck::cast_slice(&axes_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        pipeline.axes_vertex_count = axes_vertices.len() as u32;
-
-        let grid_key = GridKey {
-            enabled: self.show_grid,
-            plane: self.grid_plane,
-            extent: self.grid_extent,
-            step: self.grid_step,
-        };
-        if pipeline.grid_key != Some(grid_key) {
-            pipeline.grid_key = Some(grid_key);
-            if !self.show_grid {
-                pipeline.grid_vertex_count = 0;
-            } else {
-                let extent = self.grid_extent.max(0.5);
-                let step = self.grid_step.max(0.05);
-                let vertices = build_grid_vertices(self.grid_plane, extent, step);
-
-                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_grid_vertices"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                pipeline.grid_vertices = buffer;
-                pipeline.grid_vertex_count = vertices.len() as u32;
-            }
-        }
-
-        if pipeline.entities_version != self.entities_version {
-            pipeline.entities_version = self.entities_version;
-
-            if let Some(mesh) = build_scene_mesh(self.entities.as_slice()) {
-                let (vertices, indices) = mesh_to_vertex_index(&mesh);
-
-                pipeline.vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_mesh_vertices"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-                pipeline.indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("scene_mesh_indices"),
-                    contents: bytemuck::cast_slice(&indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-                pipeline.index_count = indices.len() as u32;
-            } else {
-                pipeline.index_count = 0;
-            }
-        }
-
-        if pipeline.preview_version != self.preview_version {
-            pipeline.preview_version = self.preview_version;
-            if let Some((start, end)) = self.preview_line {
-                let key = PreviewKey { start, end };
-                if pipeline.preview_key != Some(key) {
-                    pipeline.preview_key = Some(key);
-                    let vertices = [
-                        GridVertex { position: start.to_array() },
-                        GridVertex { position: end.to_array() },
-                    ];
-                    pipeline.preview_vertices =
-                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_preview_vertices"),
-                            contents: bytemuck::cast_slice(&vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-                    pipeline.preview_vertex_count = 2;
-                }
-            } else {
-                pipeline.preview_key = None;
-                pipeline.preview_vertex_count = 0;
-            }
-        }
-
-        let highlight_key = self.selected.and_then(|id| {
-            self.entities
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| HighlightKey {
-                    id: e.id,
-                    position: e.position,
-                    size: e.size,
-                })
-        });
-
-        if pipeline.highlight_key != highlight_key {
-            pipeline.highlight_key = highlight_key;
-            if let Some(key) = highlight_key {
-                let s = (key.size * 0.6).max(0.05);
-                let p = key.position;
-                let vertices = [
-                    GridVertex {
-                        position: [p[0] - s, p[1], p[2]],
-                    },
-                    GridVertex {
-                        position: [p[0] + s, p[1], p[2]],
-                    },
-                    GridVertex {
-                        position: [p[0], p[1] - s, p[2]],
-                    },
-                    GridVertex {
-                        position: [p[0], p[1] + s, p[2]],
-                    },
-                    GridVertex {
-                        position: [p[0], p[1], p[2] - s],
-                    },
-                    GridVertex {
-                        position: [p[0], p[1], p[2] + s],
-                    },
-                ];
-
-                pipeline.highlight_vertices =
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("scene_highlight_vertices"),
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                pipeline.highlight_vertex_count = vertices.len() as u32;
-            } else {
-                pipeline.highlight_vertex_count = 0;
-            }
-        }
     }
 
     fn draw(
@@ -1417,86 +1161,8 @@ impl shader::Primitive for Primitive {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("scene_mesh_depth_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &pipeline.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-
-        let (bx, by, bw, bh) = pipeline.last_bounds;
-        render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
-        render_pass.set_scissor_rect(
-            clip_bounds.x,
-            clip_bounds.y,
-            clip_bounds.width,
-            clip_bounds.height,
-        );
-
-        if pipeline.grid_vertex_count > 0 {
-            render_pass.set_pipeline(&pipeline.grid_pipeline);
-            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, pipeline.grid_vertices.slice(..));
-            render_pass.draw(0..pipeline.grid_vertex_count, 0..1);
-        }
-
-        if pipeline.preview_vertex_count > 0 {
-            render_pass.set_pipeline(&pipeline.preview_pipeline);
-            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, pipeline.preview_vertices.slice(..));
-            render_pass.draw(0..pipeline.preview_vertex_count, 0..1);
-        }
-
-        if pipeline.highlight_vertex_count > 0 {
-            render_pass.set_pipeline(&pipeline.highlight_pipeline);
-            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, pipeline.highlight_vertices.slice(..));
-            render_pass.draw(0..pipeline.highlight_vertex_count, 0..1);
-        }
-
-        render_pass.set_pipeline(&pipeline.pipeline);
-        render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
-        render_pass.set_index_buffer(pipeline.indices.slice(..), wgpu::IndexFormat::Uint32);
-        if pipeline.index_count > 0 {
-            render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
-        }
-
-        // Draw axes overlay at bottom-right corner
-        if self.axes_enabled && pipeline.axes_vertex_count > 0 {
-            let size = self.axes_size.max(24.0); // pixels
-            let margin = self.axes_margin.max(0.0);
-            let (bx, by, bw, bh) = pipeline.last_bounds;
-            let vx = (bx + bw - size - margin).max(bx);
-            let vy = (by + bh - size - margin).max(by);
-            let vw = size.min(bw);
-            let vh = size.min(bh);
-
-            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
-            // Keep scissor as widget clip
-            render_pass.set_pipeline(&pipeline.axes_pipeline);
-            render_pass.set_vertex_buffer(0, pipeline.axes_vertices.slice(..));
-            render_pass.draw(0..pipeline.axes_vertex_count, 0..1);
-
-            // Restore full viewport for any further draws (not strictly needed here)
-            render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
-        }
+        self.view
+            .do_render(pipeline, encoder, target, clip_bounds);
     }
 }
 
@@ -1519,52 +1185,13 @@ struct Scene<Message> {
 
 #[derive(Debug, Clone)]
 struct SceneState {
-    target: Vec3,
-    distance: f32,
-    yaw: f32,
-    pitch: f32,
-    dragging: Dragging,
-    last_cursor: Option<Point>,
-    entities: Vec<SceneEntity>,
-    entities_version: u64,
-    selected: Option<u64>,
-    next_id: u64,
-    drag_start: Option<Vec3>,
-    drag_offset: Vec3,
-    modifiers: iced_keyboard::Modifiers,
-    sphere_center: Option<Vec3>,
-    preview_line: Option<(Vec3, Vec3)>,
-    preview_version: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Dragging {
-    None,
-    Pan,
-    Rotate,
-    MoveEntity,
-    CreateEntity,
+    model: SceneModel,
 }
 
 impl Default for SceneState {
     fn default() -> Self {
         Self {
-            target: Vec3::ZERO,
-            distance: 3.0,
-            yaw: 0.8,
-            pitch: -0.6,
-            dragging: Dragging::None,
-            last_cursor: None,
-            entities: Vec::new(),
-            entities_version: 0,
-            selected: None,
-            next_id: 1,
-            drag_start: None,
-            drag_offset: Vec3::ZERO,
-            modifiers: iced_keyboard::Modifiers::default(),
-            sphere_center: None,
-            preview_line: None,
-            preview_version: 0,
+            model: SceneModel::default(),
         }
     }
 }
@@ -1580,19 +1207,33 @@ impl<Message> shader::Program<Message> for Scene<Message> {
         bounds: Rectangle,
         cursor: iced_mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
-        // Apply sidebar-driven requests (select/focus)
-        if let Some(id) = self.request_select_id {
-            if state.entities.iter().any(|e| e.id == id) {
-                state.selected = Some(id);
-            }
-        }
-        if let Some(id) = self.request_focus_id {
-            if let Some(ent) = state.entities.iter().find(|e| e.id == id) {
-                state.target = ent.position;
-            }
-        }
+        let config = SceneConfig {
+            show_grid: self.show_grid,
+            grid_plane: self.grid_plane,
+            grid_extent: self.grid_extent,
+            grid_step: self.grid_step,
+            tool: self.tool,
+            camera_mode: self.camera_mode,
+            camera_preset: self.camera_preset,
+            axes_enabled: self.axes_enabled,
+            axes_size: self.axes_size,
+            axes_margin: self.axes_margin,
+        };
+        let requests = SceneRequests {
+            select_id: self.request_select_id,
+            focus_id: self.request_focus_id,
+        };
+
         if let Event::Keyboard(iced_keyboard::Event::ModifiersChanged(mods)) = event {
-            state.modifiers = *mods;
+            let result = state.model.update(
+                SceneInput::ModifiersChanged {
+                    shift: mods.shift(),
+                },
+                to_scene_rect(bounds),
+                config,
+                requests,
+            );
+            return scene_action(result, &self.on_entities_snapshot);
         }
 
         if let Event::Keyboard(iced_keyboard::Event::KeyPressed { key, .. }) = event {
@@ -1601,300 +1242,76 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                 iced_keyboard::Key::Named(iced_keyboard::key::Named::Delete)
                     | iced_keyboard::Key::Named(iced_keyboard::key::Named::Backspace)
             ) {
-                if let Some(selected) = state.selected {
-                    let before = state.entities.len();
-                    state.entities.retain(|e| e.id != selected);
-                    if state.entities.len() != before {
-                        state.entities_version = state.entities_version.wrapping_add(1);
-                        if let Some(cb) = &self.on_entities_snapshot {
-                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
-                            return Some(shader::Action::publish(cb(list)).and_capture());
-                        }
-                    }
-                    state.selected = None;
-                    return Some(shader::Action::request_redraw().and_capture());
-                }
+                let result = state.model.update(
+                    SceneInput::KeyDelete,
+                    to_scene_rect(bounds),
+                    config,
+                    requests,
+                );
+                return scene_action(result, &self.on_entities_snapshot);
             }
         }
 
-        let Some(cursor_pos) = cursor.position_in(bounds) else {
-            if matches!(
-                event,
-                Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Right))
-                    | Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Left))
-            ) {
-                state.dragging = Dragging::None;
-                state.last_cursor = None;
-                state.drag_start = None;
-                return Some(shader::Action::request_redraw().and_capture());
-            }
-
-            return None;
-        };
-
+        let cursor_pos = cursor.position_in(bounds);
         let scene_bounds = to_scene_rect(bounds);
 
-        // Apply camera preset if present
-        let (yaw, pitch) = if let Some(p) = self.camera_preset {
-            crate::scene::preset_angles(p)
-        } else {
-            (state.yaw, state.pitch)
-        };
-        let camera = camera_from_params(state.target, state.distance, yaw, pitch, scene_bounds, self.camera_mode);
-
-        match event {
-            Event::Mouse(iced_mouse::Event::WheelScrolled { delta }) => {
+        let input = match (event, cursor_pos) {
+            (Event::Mouse(iced_mouse::Event::WheelScrolled { delta }), Some(_)) => {
                 let scroll_y = match *delta {
                     iced_mouse::ScrollDelta::Lines { y, .. } => y,
                     iced_mouse::ScrollDelta::Pixels { y, .. } => y / 120.0,
                 };
-
-                if scroll_y.abs() > f32::EPSILON {
-                    let factor = 1.1_f32.powf(scroll_y);
-                    state.distance = (state.distance / factor).clamp(0.1, 200.0);
-                    return Some(shader::Action::request_redraw().and_capture());
-                }
+                Some(SceneInput::MouseWheel {
+                    delta_lines: scroll_y,
+                })
             }
-            Event::Mouse(iced_mouse::Event::ButtonPressed(iced_mouse::Button::Left)) => {
-                if self.tool == SceneTool::Sphere {
-                    if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                        if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                            state.sphere_center = Some(hit_pos);
-                            state.preview_line = Some((hit_pos, hit_pos));
-                            state.preview_version = state.preview_version.wrapping_add(1);
-                            state.dragging = Dragging::None;
-                            state.last_cursor = Some(cursor_pos);
-                            return Some(shader::Action::request_redraw().and_capture());
-                        }
-                    }
-                }
-
-                let hit = pick_entity(to_scene_point(cursor_pos), scene_bounds, &camera, &state.entities);
-                if let Some(id) = hit {
-                    state.selected = Some(id);
-                    state.dragging = Dragging::MoveEntity;
-                } else if let Some(create_kind) = self.tool.create_kind() {
-                    if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                        if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                            let id = state.next_id;
-                            state.next_id += 1;
-                            state.entities.push(SceneEntity {
-                                id,
-                                kind: create_kind,
-                                position: hit_pos,
-                                size: 0.2,
-                            });
-                            state.entities_version = state.entities_version.wrapping_add(1);
-                            if let Some(cb) = &self.on_entities_snapshot {
-                                let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
-                                return Some(shader::Action::publish(cb(list)).and_capture());
-                            }
-                            state.selected = Some(id);
-                            state.dragging = Dragging::CreateEntity;
-                            state.drag_start = Some(hit_pos);
-                        }
-                    }
-                }
-
-                if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                    if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                        if let Some(id) = state.selected {
-                            if let Some(entity) = state.entities.iter().find(|e| e.id == id) {
-                                state.drag_offset = entity.position - hit_pos;
-                            }
-                        }
-                    }
-                }
-
-                state.last_cursor = Some(cursor_pos);
-                return Some(shader::Action::request_redraw().and_capture());
+            (Event::Mouse(iced_mouse::Event::ButtonPressed(iced_mouse::Button::Left)), Some(pos)) => {
+                Some(SceneInput::MouseDownLeft {
+                    pos: to_scene_point(pos),
+                })
             }
-            Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Left)) => {
-                if matches!(state.dragging, Dragging::MoveEntity | Dragging::CreateEntity) {
-                    state.dragging = Dragging::None;
-                    state.last_cursor = None;
-                    state.drag_start = None;
-                    return Some(shader::Action::request_redraw().and_capture());
-                }
+            (Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Left)), _) => {
+                Some(SceneInput::MouseUpLeft)
             }
-            Event::Mouse(iced_mouse::Event::ButtonPressed(iced_mouse::Button::Right)) => {
-                if self.tool == SceneTool::Sphere {
-                    if let Some(center) = state.sphere_center {
-                        if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                                let radius = (hit_pos - center).length().max(0.05);
-                                let id = state.next_id;
-                                state.next_id += 1;
-                                state.entities.push(SceneEntity {
-                                    id,
-                                    kind: SolidKind::Sphere,
-                                    position: center,
-                                    size: radius * 2.0,
-                                });
-                                state.entities_version = state.entities_version.wrapping_add(1);
-                                if let Some(cb) = &self.on_entities_snapshot {
-                                    let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
-                                    return Some(shader::Action::publish(cb(list)).and_capture());
-                                }
-                                state.selected = Some(id);
-                                state.sphere_center = None;
-                                state.preview_line = None;
-                                state.preview_version = state.preview_version.wrapping_add(1);
-                                state.last_cursor = Some(cursor_pos);
-                                return Some(shader::Action::request_redraw().and_capture());
-                            }
-                        }
-                    }
-                }
-
-                if state.modifiers.shift() {
-                    state.dragging = Dragging::Pan;
-                } else {
-                    state.dragging = Dragging::Rotate;
-                }
-                state.last_cursor = Some(cursor_pos);
-                return Some(shader::Action::request_redraw().and_capture());
+            (Event::Mouse(iced_mouse::Event::ButtonPressed(iced_mouse::Button::Right)), Some(pos)) => {
+                Some(SceneInput::MouseDownRight {
+                    pos: to_scene_point(pos),
+                })
             }
-            Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Right)) => {
-                if matches!(state.dragging, Dragging::Pan | Dragging::Rotate) {
-                    state.dragging = Dragging::None;
-                    state.last_cursor = None;
-                    return Some(shader::Action::request_redraw().and_capture());
-                }
+            (Event::Mouse(iced_mouse::Event::ButtonReleased(iced_mouse::Button::Right)), _) => {
+                Some(SceneInput::MouseUpRight)
             }
-            Event::Mouse(iced_mouse::Event::CursorMoved { .. }) => {
-                if self.tool == SceneTool::Sphere {
-                    if let Some(center) = state.sphere_center {
-                        if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                                state.preview_line = Some((center, hit_pos));
-                                state.preview_version = state.preview_version.wrapping_add(1);
-                                state.last_cursor = Some(cursor_pos);
-                                return Some(shader::Action::request_redraw().and_capture());
-                            }
-                        }
-                    }
-                }
-
-                match state.dragging {
-                    Dragging::None => {}
-                    Dragging::MoveEntity => {
-                        if let Some((origin, dir)) = ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera) {
-                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                                if let Some(id) = state.selected {
-                                    if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
-                                        entity.position = hit_pos + state.drag_offset;
-                                        state.entities_version = state.entities_version.wrapping_add(1);
-                                        if let Some(cb) = &self.on_entities_snapshot {
-                                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
-                                            return Some(shader::Action::publish(cb(list)).and_capture());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        state.last_cursor = Some(cursor_pos);
-                        return Some(shader::Action::request_redraw().and_capture());
-                    }
-                    Dragging::CreateEntity => {
-                        if let (Some(start), Some((origin, dir))) =
-                            (state.drag_start, ray_from_cursor(to_scene_point(cursor_pos), scene_bounds, &camera))
-                        {
-                            if let Some(hit_pos) = intersect_plane(self.grid_plane, origin, dir) {
-                                if let Some(id) = state.selected {
-                                    if let Some(entity) = state.entities.iter_mut().find(|e| e.id == id) {
-                                        let diff = hit_pos - start;
-                                        let dist = diff.length().max(0.1);
-                                        entity.size = dist;
-                                        state.entities_version = state.entities_version.wrapping_add(1);
-                                        if let Some(cb) = &self.on_entities_snapshot {
-                                            let list: Vec<SceneEntityInfo> = state.entities.iter().map(SceneEntityInfo::from).collect();
-                                            return Some(shader::Action::publish(cb(list)).and_capture());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        state.last_cursor = Some(cursor_pos);
-                        return Some(shader::Action::request_redraw().and_capture());
-                    }
-                    Dragging::Pan => {
-                        if let Some(last) = state.last_cursor {
-                            let dx = cursor_pos.x - last.x;
-                            let dy = cursor_pos.y - last.y;
-
-                            if bounds.width > 1.0 && bounds.height > 1.0 {
-                                let dx_ndc = (dx * 2.0) / bounds.width;
-                                let dy_ndc = (-dy * 2.0) / bounds.height;
-
-                                let half_h = camera.ortho_half_h;
-                                let half_w = half_h * camera.aspect;
-
-                                let pan = camera.right * (dx_ndc * half_w)
-                                    + camera.up * (dy_ndc * half_h);
-                                state.target += pan;
-                            }
-
-                            state.last_cursor = Some(cursor_pos);
-                            return Some(shader::Action::request_redraw().and_capture());
-                        } else {
-                            state.last_cursor = Some(cursor_pos);
-                            return Some(shader::Action::request_redraw().and_capture());
-                        }
-                    }
-                    Dragging::Rotate => {
-                        if let Some(last) = state.last_cursor {
-                            let dx = cursor_pos.x - last.x;
-                            let dy = cursor_pos.y - last.y;
-
-                            let rot_speed = 2.5;
-                            if bounds.width > 1.0 && bounds.height > 1.0 {
-                                state.yaw += (dx / bounds.width) * rot_speed;
-                                state.pitch += (dy / bounds.height) * rot_speed;
-                            } else {
-                                state.yaw += dx * 0.01;
-                                state.pitch += dy * 0.01;
-                            }
-
-                            let max_pitch = 1.55;
-                            state.pitch = state.pitch.clamp(-max_pitch, max_pitch);
-
-                            state.last_cursor = Some(cursor_pos);
-                            return Some(shader::Action::request_redraw().and_capture());
-                        } else {
-                            state.last_cursor = Some(cursor_pos);
-                            return Some(shader::Action::request_redraw().and_capture());
-                        }
-                    }
-                }
+            (Event::Mouse(iced_mouse::Event::CursorMoved { .. }), Some(pos)) => {
+                Some(SceneInput::MouseMove {
+                    pos: to_scene_point(pos),
+                })
             }
-            _ => {}
+            _ => None,
+        };
+
+        if let Some(input) = input {
+            let result = state.model.update(input, scene_bounds, config, requests);
+            return scene_action(result, &self.on_entities_snapshot);
         }
 
         None
     }
 
     fn draw(&self, state: &Self::State, _cursor: iced_mouse::Cursor, _bounds: Rectangle) -> Primitive {
-        Primitive {
-            target: state.target,
-            distance: state.distance,
-            yaw: if let Some(p) = self.camera_preset { crate::scene::preset_angles(p).0 } else { state.yaw },
-            pitch: if let Some(p) = self.camera_preset { crate::scene::preset_angles(p).1 } else { state.pitch },
-            camera_mode: self.camera_mode,
+        let config = SceneConfig {
             show_grid: self.show_grid,
             grid_plane: self.grid_plane,
             grid_extent: self.grid_extent,
             grid_step: self.grid_step,
-            entities: Arc::new(state.entities.clone()),
-            entities_version: state.entities_version,
-            preview_line: state.preview_line,
-            preview_version: state.preview_version,
-            selected: state.selected,
+            tool: self.tool,
+            camera_mode: self.camera_mode,
+            camera_preset: self.camera_preset,
             axes_enabled: self.axes_enabled,
             axes_size: self.axes_size,
             axes_margin: self.axes_margin,
+        };
+        Primitive {
+            view: state.model.view(config),
         }
     }
 
@@ -1904,7 +1321,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
         bounds: Rectangle,
         cursor: iced_mouse::Cursor,
     ) -> iced_mouse::Interaction {
-        if cursor.position_in(bounds).is_some() && state.dragging != Dragging::None {
+        if cursor.position_in(bounds).is_some() && state.model.is_dragging() {
             iced_mouse::Interaction::Grabbing
         } else if cursor.position_in(bounds).is_some() {
             iced_mouse::Interaction::Grab
@@ -1912,6 +1329,33 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             iced_mouse::Interaction::default()
         }
     }
+}
+
+fn scene_action<Message>(
+    result: SceneUpdateResult,
+    on_entities_snapshot: &Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
+) -> Option<shader::Action<Message>> {
+    if !result.handled && result.publish_entities.is_none() && !result.request_redraw {
+        return None;
+    }
+
+    let mut action = if let Some(list) = result.publish_entities {
+        if let Some(cb) = on_entities_snapshot {
+            shader::Action::publish(cb(list))
+        } else {
+            shader::Action::request_redraw()
+        }
+    } else if result.request_redraw {
+        shader::Action::request_redraw()
+    } else {
+        return None;
+    };
+
+    if result.capture {
+        action = action.and_capture();
+    }
+
+    Some(action)
 }
 
 pub fn scene_widget<'a, Message>(
