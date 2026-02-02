@@ -3,7 +3,10 @@ use truck_modeling::*;
 use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
 use truck_polymesh::obj::read;
 use meshx::mesh::TetMesh;
+#[cfg(not(target_arch = "wasm32"))]
 use meshx::io::msh::{self, ElementType};
+#[cfg(target_arch = "wasm32")]
+use mshio::{self as msh, ElementType};
 use std::collections::HashMap;
 use std::path::Path;
 use std::f64::consts::PI;

@@ -19,5 +19,12 @@ truck-shapeops = "0.4.0"
 truck-meshalgo = "0.4.0"
 nalgebra-glm = "0.20"
 glam = "0.30"
-meshx = "0.7.0"
+meshx = { version = "0.7.0", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meshx = { version = "0.7.0", features = ["io"] }
 rfd = "0.13"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+mshio = "0.4"

@@ -114,6 +114,7 @@ struct GmshLoadResult {
     label: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
     let file = rfd::FileDialog::new()
         .add_filter("Gmsh", &["msh"])
@@ -129,6 +130,11 @@ async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
         mesh,
         label: path_label(&path),
     }))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
+    Ok(None)
 }
 
 fn path_label(path: &PathBuf) -> String {
