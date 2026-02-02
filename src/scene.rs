@@ -284,6 +284,23 @@ fn build_scene_mesh(entities: &[SceneEntity]) -> Option<PolygonMesh> {
     Some(mesh)
 }
 
+fn build_scene_mesh_with_external(
+    entities: &[SceneEntity],
+    external: Option<&PolygonMesh>,
+) -> Option<PolygonMesh> {
+    let base = build_scene_mesh(entities);
+
+    match (base, external) {
+        (Some(mut mesh), Some(external_mesh)) => {
+            mesh.merge(external_mesh.clone());
+            Some(mesh)
+        }
+        (Some(mesh), None) => Some(mesh),
+        (None, Some(external_mesh)) => Some(external_mesh.clone()),
+        (None, None) => None,
+    }
+}
+
 fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
     let positions = mesh.positions();
     let has_normals = !mesh.normals().is_empty();
@@ -379,6 +396,55 @@ fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
     }
 
     (vertices, tri_indices)
+}
+
+fn mesh_to_edge_vertices(mesh: &PolygonMesh) -> Vec<GridVertex> {
+    use std::collections::HashSet;
+
+    let positions = mesh.positions();
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+
+    let mut add_edge = |a: usize, b: usize| {
+        let (min_i, max_i) = if a < b { (a, b) } else { (b, a) };
+        edges.insert((min_i, max_i));
+    };
+
+    for tri in mesh.tri_faces() {
+        add_edge(tri[0].pos, tri[1].pos);
+        add_edge(tri[1].pos, tri[2].pos);
+        add_edge(tri[2].pos, tri[0].pos);
+    }
+
+    for quad in mesh.quad_faces() {
+        add_edge(quad[0].pos, quad[1].pos);
+        add_edge(quad[1].pos, quad[2].pos);
+        add_edge(quad[2].pos, quad[3].pos);
+        add_edge(quad[3].pos, quad[0].pos);
+    }
+
+    for face in mesh.other_faces() {
+        if face.len() < 2 {
+            continue;
+        }
+        for i in 0..face.len() {
+            let a = face[i].pos;
+            let b = face[(i + 1) % face.len()].pos;
+            add_edge(a, b);
+        }
+    }
+
+    let mut vertices = Vec::with_capacity(edges.len() * 2);
+    for (a, b) in edges {
+        let pa = positions[a];
+        let pb = positions[b];
+        vertices.push(GridVertex {
+            position: [pa.x as f32, pa.y as f32, pa.z as f32],
+        });
+        vertices.push(GridVertex {
+            position: [pb.x as f32, pb.y as f32, pb.z as f32],
+        });
+    }
+    vertices
 }
 
 fn build_grid_vertices(plane: GridPlane, extent: f32, step: f32) -> Vec<GridVertex> {
@@ -679,6 +745,9 @@ pub struct Pipeline {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+    edge_pipeline: wgpu::RenderPipeline,
+    edge_vertices: wgpu::Buffer,
+    edge_vertex_count: u32,
     grid_pipeline: wgpu::RenderPipeline,
     grid_vertices: wgpu::Buffer,
     grid_vertex_count: u32,
@@ -692,7 +761,7 @@ pub struct Pipeline {
     highlight_vertices: wgpu::Buffer,
     highlight_vertex_count: u32,
     highlight_key: Option<HighlightKey>,
-    entities_version: u64,
+    mesh_version: (u64, u64),
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     depth: wgpu::TextureView,
@@ -795,6 +864,42 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
     return vec4<f32>(0.55, 0.58, 0.66, 0.55);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_edge_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.08, 0.08, 0.08, 0.9);
 }
 "#
                 .into(),
@@ -1154,6 +1259,46 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_edge_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &edge_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &edge_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let preview_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_preview_pipeline"),
             layout: Some(&pipeline_layout),
@@ -1333,6 +1478,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             vertices: vertex_buffer,
             indices: index_buffer,
             index_count: 0,
+            edge_pipeline,
+            edge_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_edge_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            edge_vertex_count: 0,
             grid_pipeline,
             grid_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_grid_vertices"),
@@ -1361,7 +1514,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }),
             highlight_vertex_count: 0,
             highlight_key: None,
-            entities_version: 0,
+            mesh_version: (0, 0),
             uniforms,
             bind_group,
             depth,
@@ -1392,6 +1545,8 @@ pub struct Primitive {
     grid_step: f32,
     entities: Arc<Vec<SceneEntity>>,
     entities_version: u64,
+    external_mesh: Option<Arc<PolygonMesh>>,
+    external_version: u64,
     preview_line: Option<(Vec3, Vec3)>,
     preview_version: u64,
     selected: Option<u64>,
@@ -1567,11 +1722,16 @@ impl shader::Primitive for Primitive {
             }
         }
 
-        if pipeline.entities_version != self.entities_version {
-            pipeline.entities_version = self.entities_version;
+        let mesh_version = (self.entities_version, self.external_version);
+        if pipeline.mesh_version != mesh_version {
+            pipeline.mesh_version = mesh_version;
 
-            if let Some(mesh) = build_scene_mesh(self.entities.as_slice()) {
+            if let Some(mesh) = build_scene_mesh_with_external(
+                self.entities.as_slice(),
+                self.external_mesh.as_deref(),
+            ) {
                 let (vertices, indices) = mesh_to_vertex_index(&mesh);
+                let edge_vertices = mesh_to_edge_vertices(&mesh);
 
                 pipeline.vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_mesh_vertices"),
@@ -1585,9 +1745,18 @@ impl shader::Primitive for Primitive {
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
+                pipeline.edge_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_edge_vertices"),
+                    contents: bytemuck::cast_slice(&edge_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                pipeline.edge_vertex_count = edge_vertices.len() as u32;
+
                 pipeline.index_count = indices.len() as u32;
             } else {
                 pipeline.index_count = 0;
+                pipeline.edge_vertex_count = 0;
             }
         }
 
@@ -1742,6 +1911,13 @@ impl shader::Primitive for Primitive {
             render_pass.draw_indexed(0..pipeline.index_count, 0, 0..1);
         }
 
+        if pipeline.edge_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.edge_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.edge_vertices.slice(..));
+            render_pass.draw(0..pipeline.edge_vertex_count, 0..1);
+        }
+
         // Draw axes overlay at bottom-right corner
         if self.axes_enabled && pipeline.axes_vertex_count > 0 {
             let size = self.axes_size.max(24.0); // pixels
@@ -1776,6 +1952,10 @@ pub struct Scene<Message> {
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    zoom_request_factor: f32,
+    zoom_request_version: u64,
+    external_mesh: Option<Arc<PolygonMesh>>,
+    external_version: u64,
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>, 
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
@@ -1799,6 +1979,7 @@ pub struct SceneState {
     sphere_center: Option<Vec3>,
     preview_line: Option<(Vec3, Vec3)>,
     preview_version: u64,
+    zoom_request_version: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1829,6 +2010,7 @@ impl Default for SceneState {
             sphere_center: None,
             preview_line: None,
             preview_version: 0,
+            zoom_request_version: 0,
         }
     }
 }
@@ -1844,6 +2026,14 @@ impl<Message> shader::Program<Message> for Scene<Message> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        if self.zoom_request_version != state.zoom_request_version {
+            state.zoom_request_version = self.zoom_request_version;
+            if (self.zoom_request_factor - 1.0).abs() > f32::EPSILON {
+                state.distance = (state.distance / self.zoom_request_factor).clamp(0.1, 200.0);
+                return Some(shader::Action::request_redraw());
+            }
+        }
+
         // Apply sidebar-driven requests (select/focus)
         if let Some(id) = self.request_select_id {
             if state.entities.iter().any(|e| e.id == id) {
@@ -2151,6 +2341,8 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             grid_step: self.grid_step,
             entities: Arc::new(state.entities.clone()),
             entities_version: state.entities_version,
+            external_mesh: self.external_mesh.clone(),
+            external_version: self.external_version,
             preview_line: state.preview_line,
             preview_version: state.preview_version,
             selected: state.selected,
@@ -2187,6 +2379,10 @@ pub fn widget<'a, Message>(
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    zoom_request_factor: f32,
+    zoom_request_version: u64,
+    external_mesh: Option<Arc<PolygonMesh>>,
+    external_version: u64,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
@@ -2205,6 +2401,10 @@ where
         axes_enabled,
         axes_size,
         axes_margin,
+        zoom_request_factor,
+        zoom_request_version,
+        external_mesh,
+        external_version,
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         request_select_id,
         request_focus_id,

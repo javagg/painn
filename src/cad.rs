@@ -1,9 +1,12 @@
 use truck_meshalgo::prelude::*;
 use truck_modeling::*;
-use truck_polymesh::PolygonMesh;
+use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
 use truck_polymesh::obj::read;
+use meshx::mesh::TetMesh;
+use meshx::io::msh::{self, ElementType};
+use std::collections::HashMap;
+use std::path::Path;
 use std::f64::consts::PI;
-use glam;
 
 pub fn load_obj() -> PolygonMesh {
       let polygon = read(include_bytes!("teapot.obj").as_ref()).unwrap();
@@ -14,6 +17,123 @@ pub fn to_mesh(solid: &Solid) -> PolygonMesh {
     let mesh_with_topology = solid.triangulation(0.01);
     let mesh = mesh_with_topology.to_polygon();
     mesh
+}
+
+pub fn load_gmsh_mesh(path: &Path) -> std::result::Result<PolygonMesh, String> {
+    let msh_bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let msh: msh::MshFile<u64, i32, f64> =
+        msh::parse_msh_bytes(msh_bytes.as_slice()).map_err(|e| e.to_string())?;
+
+    let nodes = msh
+        .data
+        .nodes
+        .as_ref()
+        .ok_or_else(|| "Missing nodes in Gmsh file".to_string())?;
+
+    let mut positions: Vec<Point3> = Vec::new();
+    let mut point_map: HashMap<u64, usize> = HashMap::new();
+
+    let mut add_node = |node_tag: u64, node: &msh::Node<f64>| -> usize {
+        *point_map.entry(node_tag).or_insert_with(|| {
+            let new_index = positions.len();
+            positions.push(Point3::new(node.x, node.y, node.z));
+            new_index
+        })
+    };
+
+    let mut find_and_add_node = |node_tag: u64| -> Option<usize> {
+        let mut offset = 0;
+        for block in nodes.node_blocks.iter() {
+            if let Some(tags) = &block.node_tags {
+                if let Some(&index_in_block) = tags.get(&node_tag) {
+                    return Some(add_node(node_tag, &block.nodes[index_in_block - 1]));
+                }
+            } else {
+                let mut node_index = node_tag as usize;
+                if node_index < offset {
+                    break;
+                }
+                node_index -= offset;
+                if node_index <= block.nodes.len() {
+                    return Some(add_node(node_tag, &block.nodes[node_index - 1]));
+                }
+            }
+            offset += block.nodes.len();
+        }
+        None
+    };
+
+    let elements = msh
+        .data
+        .elements
+        .as_ref()
+        .ok_or_else(|| "Missing elements in Gmsh file".to_string())?;
+
+    let mut tri_faces: Vec<[StandardVertex; 3]> = Vec::new();
+    let mut tet_cells: Vec<[usize; 4]> = Vec::new();
+
+    for block in elements.element_blocks.iter() {
+        match block.element_type {
+            ElementType::Tri3 => {
+                for element in block.elements.iter() {
+                    if element.nodes.len() < 3 {
+                        continue;
+                    }
+                    let a = find_and_add_node(element.nodes[0])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    let b = find_and_add_node(element.nodes[1])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    let c = find_and_add_node(element.nodes[2])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    tri_faces.push([
+                        StandardVertex { pos: a, uv: None, nor: None },
+                        StandardVertex { pos: b, uv: None, nor: None },
+                        StandardVertex { pos: c, uv: None, nor: None },
+                    ]);
+                }
+            }
+            ElementType::Tet4 => {
+                for element in block.elements.iter() {
+                    if element.nodes.len() < 4 {
+                        continue;
+                    }
+                    let a = find_and_add_node(element.nodes[0])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    let b = find_and_add_node(element.nodes[1])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    let c = find_and_add_node(element.nodes[2])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    let d = find_and_add_node(element.nodes[3])
+                        .ok_or_else(|| "Missing node data".to_string())?;
+                    tet_cells.push([a, b, c, d]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !tet_cells.is_empty() {
+        let surface = TetMesh::<f64>::surface_topo_from_tets(tet_cells.iter());
+        for tri in surface {
+            tri_faces.push([
+                StandardVertex { pos: tri[0], uv: None, nor: None },
+                StandardVertex { pos: tri[1], uv: None, nor: None },
+                StandardVertex { pos: tri[2], uv: None, nor: None },
+            ]);
+        }
+    }
+
+    if tri_faces.is_empty() {
+        return Err("No surface triangles found in the Gmsh mesh.".to_string());
+    }
+
+    let attributes = StandardAttributes {
+        positions,
+        uv_coords: Vec::new(),
+        normals: Vec::new(),
+    };
+    let faces = Faces::from_tri_and_quad_faces(tri_faces, Vec::new());
+    Ok(PolygonMesh::new(attributes, faces))
 }
 
 pub fn box_solid(width: f64, height: f64, depth: f64) -> Solid {

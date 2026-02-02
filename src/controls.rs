@@ -618,8 +618,17 @@ pub fn scene_controls<'a>(
     scene_axes_margin: f32,
     scene_grid_extent: f32,
     scene_grid_step: f32,
+    gmsh_status: Option<&'a str>,
 ) -> Element<'a, crate::Message> {
     column![
+        row![
+            button("Load Gmsh...").on_press(crate::Message::LoadGmsh),
+            text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),
+            button("Zoom In").on_press(crate::Message::SceneZoomIn),
+            button("Zoom Out").on_press(crate::Message::SceneZoomOut),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
         row![
             button(if scene_show_grid { "Grid: On" } else { "Grid: Off" })
                 .on_press(crate::Message::SceneGridToggle),

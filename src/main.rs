@@ -8,6 +8,9 @@ use drawing::{CanvasEvent, Draft, Shape, Tool};
 use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
 use iced::widget::{column, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
+use std::path::PathBuf;
+use std::sync::Arc;
+use truck_polymesh::PolygonMesh;
 
 use i_float::int::point::IntPoint;
 use i_overlay::core::fill_rule::FillRule;
@@ -94,11 +97,45 @@ enum Message {
     // Scene actions from sidebar
     SceneSelectEntity(u64),
     SceneFocusEntity(u64),
+    SceneZoomIn,
+    SceneZoomOut,
+    LoadGmsh,
+    GmshLoaded(Result<Option<GmshLoadResult>, String>),
     Canvas(CanvasEvent),
 }
 
 fn wrap_canvas_event(e: CanvasEvent) -> Message {
     Message::Canvas(e)
+}
+
+#[derive(Debug, Clone)]
+struct GmshLoadResult {
+    mesh: PolygonMesh,
+    label: String,
+}
+
+async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
+    let file = rfd::FileDialog::new()
+        .add_filter("Gmsh", &["msh"])
+        .set_title("Open Gmsh Mesh")
+        .pick_file();
+
+    let Some(path) = file else {
+        return Ok(None);
+    };
+
+    let mesh = cad::load_gmsh_mesh(&path)?;
+    Ok(Some(GmshLoadResult {
+        mesh,
+        label: path_label(&path),
+    }))
+}
+
+fn path_label(path: &PathBuf) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[derive(Debug)]
@@ -132,6 +169,11 @@ struct App {
     scene_entities: Vec<SceneEntityInfo>,
     scene_request_select_id: Option<u64>,
     scene_request_focus_id: Option<u64>,
+    scene_zoom_factor: f32,
+    scene_zoom_version: u64,
+    gmsh_mesh: Option<Arc<PolygonMesh>>,
+    gmsh_mesh_version: u64,
+    gmsh_status: Option<String>,
 }
 
 impl App {
@@ -166,6 +208,11 @@ impl App {
             scene_entities: Vec::new(),
             scene_request_select_id: None,
             scene_request_focus_id: None,
+            scene_zoom_factor: 1.0,
+            scene_zoom_version: 0,
+            gmsh_mesh: None,
+            gmsh_mesh_version: 0,
+            gmsh_status: None,
         }
     }
 
@@ -334,6 +381,34 @@ impl App {
             Message::SceneFocusEntity(id) => {
                 self.scene_request_focus_id = Some(id);
                 self.invalidate();
+            }
+            Message::SceneZoomIn => {
+                self.scene_zoom_factor = 1.1;
+                self.scene_zoom_version = self.scene_zoom_version.wrapping_add(1);
+                self.invalidate();
+            }
+            Message::SceneZoomOut => {
+                self.scene_zoom_factor = 1.0 / 1.1;
+                self.scene_zoom_version = self.scene_zoom_version.wrapping_add(1);
+                self.invalidate();
+            }
+            Message::LoadGmsh => {
+                return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
+            }
+            Message::GmshLoaded(result) => {
+                match result {
+                    Ok(Some(loaded)) => {
+                        self.gmsh_mesh = Some(Arc::new(loaded.mesh));
+                        self.gmsh_mesh_version = self.gmsh_mesh_version.wrapping_add(1);
+                        self.gmsh_status = Some(format!("Gmsh: {}", loaded.label));
+                        self.invalidate();
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        self.gmsh_status = Some(format!("Gmsh load failed: {err}"));
+                        self.invalidate();
+                    }
+                }
             }
             Message::Quit => {
                 // TODO: request app quit (platform dependent)
@@ -729,6 +804,7 @@ impl App {
             self.scene_axes_margin,
             self.scene_grid_extent,
             self.scene_grid_step,
+            self.gmsh_status.as_deref(),
         );
 
         let scene_view = scene::widget::<Message>(
@@ -742,6 +818,10 @@ impl App {
             self.scene_axes_enabled,
             self.scene_axes_size,
             self.scene_axes_margin,
+            self.scene_zoom_factor,
+            self.scene_zoom_version,
+            self.gmsh_mesh.clone(),
+            self.gmsh_mesh_version,
             self.scene_request_select_id,
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),
