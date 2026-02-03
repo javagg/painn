@@ -2,8 +2,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::scene::{
-    build_grid_vertices, build_scene_mesh, camera_from_params, mesh_to_vertex_index, AxesVertex,
-    GridPlane, GridVertex, SceneRect, SceneView, Uniforms,
+    AxesVertex, GridPlane, GridVertex, SceneRect, SceneView, Uniforms, Vertex, build_grid_vertices, build_scene_mesh, camera_from_params, mesh_to_vertex_index
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +55,533 @@ pub struct Pipeline {
     pub(crate) axes_pipeline: wgpu::RenderPipeline,
     pub(crate) axes_vertices: wgpu::Buffer,
     pub(crate) axes_vertex_count: u32,
+}
+
+impl Pipeline {
+    pub fn create(
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_mesh_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    let nmat = mat3x3<f32>(
+        uniforms.model_view[0].xyz,
+        uniforms.model_view[1].xyz,
+        uniforms.model_view[2].xyz,
+    );
+    out.normal = normalize(nmat * in.normal);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let ambient = 0.18;
+    let light_dir = normalize(vec3<f32>(0.3, 0.6, 0.8));
+    let ndotl = max(dot(normalize(in.normal), light_dir), 0.0);
+
+    let base = vec3<f32>(0.88, 0.90, 0.96);
+    let color = base * (ambient + (1.0 - ambient) * ndotl);
+
+    return vec4<f32>(color, 1.0);
+}
+"#
+                    .into(),
+            ),
+        });
+
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_grid_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.55, 0.58, 0.66, 0.55);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let preview_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_preview_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.95, 0.82, 0.2, 0.9);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let highlight_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_highlight_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.2, 0.9, 0.95, 0.9);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("scene_triangle_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let initial_uniforms = Uniforms {
+            model_view: Mat4::IDENTITY.to_cols_array_2d(),
+            mvp: Mat4::IDENTITY.to_cols_array_2d(),
+        };
+        let uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_mesh_uniforms"),
+            contents: bytemuck::bytes_of(&initial_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_mesh_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            }],
+        });
+
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_mesh_vertices"),
+            size: 4,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scene_mesh_indices"),
+            size: 4,
+            usage: wgpu::BufferUsages::INDEX,
+            mapped_at_creation: false,
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene_mesh_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_mesh_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_grid_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let preview_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_preview_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &preview_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &preview_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let highlight_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_highlight_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &highlight_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        // Axes overlay pipeline (no uniforms, colored lines in clip space)
+        let axes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_axes_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
+"#
+                    .into(),
+            ),
+        });
+
+        let axes_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene_axes_pipeline_layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        let axes_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_axes_pipeline"),
+            layout: Some(&axes_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &axes_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[AxesVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &axes_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_depth"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self {
+            pipeline,
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            index_count: 0,
+            grid_pipeline,
+            grid_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_grid_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            grid_vertex_count: 0,
+            grid_key: None,
+            preview_pipeline,
+            preview_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_preview_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            preview_vertex_count: 0,
+            preview_key: None,
+            preview_version: 0,
+            highlight_pipeline,
+            highlight_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_highlight_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            highlight_vertex_count: 0,
+            highlight_key: None,
+            entities_version: 0,
+            uniforms,
+            bind_group,
+            depth,
+            depth_size: (1, 1),
+            last_bounds: (0.0, 0.0, 1.0, 1.0),
+            axes_pipeline,
+            axes_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_axes_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            axes_vertex_count: 0,
+        }
+    }
+
 }
 
 impl SceneView {
