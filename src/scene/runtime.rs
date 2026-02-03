@@ -20,6 +20,125 @@ enum Dragging {
     CreateEntity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoxCreateStep {
+    BaseStart,
+    BaseSize,
+    Height,
+}
+
+fn height_from_cursor(
+    origin: Vec3,
+    dir: Vec3,
+    base_center: Vec3,
+    plane_normal: Vec3,
+    camera_forward: Vec3,
+) -> f32 {
+    let denom = dir.dot(camera_forward);
+    if denom.abs() <= 1.0e-6 {
+        return 0.0;
+    }
+    let t = (base_center - origin).dot(camera_forward) / denom;
+    let p = origin + dir * t;
+    (p - base_center).dot(plane_normal).abs()
+}
+
+fn grid_axes(plane: GridPlane) -> (Vec3, Vec3, Vec3) {
+    match plane {
+        GridPlane::XY => (Vec3::X, Vec3::Y, Vec3::Z),
+        GridPlane::XZ => (Vec3::X, Vec3::Z, Vec3::Y),
+        GridPlane::YZ => (Vec3::Y, Vec3::Z, Vec3::X),
+    }
+}
+
+fn rect_corners(plane: GridPlane, a: Vec3, b: Vec3) -> [Vec3; 4] {
+    match plane {
+        GridPlane::XY => {
+            let z = a.z;
+            let min_x = a.x.min(b.x);
+            let max_x = a.x.max(b.x);
+            let min_y = a.y.min(b.y);
+            let max_y = a.y.max(b.y);
+            [
+                Vec3::new(min_x, min_y, z),
+                Vec3::new(max_x, min_y, z),
+                Vec3::new(max_x, max_y, z),
+                Vec3::new(min_x, max_y, z),
+            ]
+        }
+        GridPlane::XZ => {
+            let y = a.y;
+            let min_x = a.x.min(b.x);
+            let max_x = a.x.max(b.x);
+            let min_z = a.z.min(b.z);
+            let max_z = a.z.max(b.z);
+            [
+                Vec3::new(min_x, y, min_z),
+                Vec3::new(max_x, y, min_z),
+                Vec3::new(max_x, y, max_z),
+                Vec3::new(min_x, y, max_z),
+            ]
+        }
+        GridPlane::YZ => {
+            let x = a.x;
+            let min_y = a.y.min(b.y);
+            let max_y = a.y.max(b.y);
+            let min_z = a.z.min(b.z);
+            let max_z = a.z.max(b.z);
+            [
+                Vec3::new(x, min_y, min_z),
+                Vec3::new(x, max_y, min_z),
+                Vec3::new(x, max_y, max_z),
+                Vec3::new(x, min_y, max_z),
+            ]
+        }
+    }
+}
+
+fn base_size_and_center(plane: GridPlane, a: Vec3, b: Vec3) -> (Vec3, Vec3) {
+    match plane {
+        GridPlane::XY => {
+            let min_x = a.x.min(b.x);
+            let max_x = a.x.max(b.x);
+            let min_y = a.y.min(b.y);
+            let max_y = a.y.max(b.y);
+            let z = a.z;
+            let size = Vec3::new((max_x - min_x).abs(), (max_y - min_y).abs(), 0.0);
+            let center = Vec3::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, z);
+            (size, center)
+        }
+        GridPlane::XZ => {
+            let min_x = a.x.min(b.x);
+            let max_x = a.x.max(b.x);
+            let min_z = a.z.min(b.z);
+            let max_z = a.z.max(b.z);
+            let y = a.y;
+            let size = Vec3::new((max_x - min_x).abs(), 0.0, (max_z - min_z).abs());
+            let center = Vec3::new((min_x + max_x) * 0.5, y, (min_z + max_z) * 0.5);
+            (size, center)
+        }
+        GridPlane::YZ => {
+            let min_y = a.y.min(b.y);
+            let max_y = a.y.max(b.y);
+            let min_z = a.z.min(b.z);
+            let max_z = a.z.max(b.z);
+            let x = a.x;
+            let size = Vec3::new(0.0, (max_y - min_y).abs(), (max_z - min_z).abs());
+            let center = Vec3::new(x, (min_y + max_y) * 0.5, (min_z + max_z) * 0.5);
+            (size, center)
+        }
+    }
+}
+
+fn line_segments_for_rect(corners: [Vec3; 4]) -> Vec<(Vec3, Vec3)> {
+    vec![
+        (corners[0], corners[1]),
+        (corners[1], corners[2]),
+        (corners[2], corners[3]),
+        (corners[3], corners[0]),
+    ]
+}
+
 #[derive(Debug, Clone)]
 pub struct SceneModel {
     target: Vec3,
@@ -36,8 +155,13 @@ pub struct SceneModel {
     drag_offset: Vec3,
     modifiers: SceneModifiers,
     sphere_center: Option<Vec3>,
-    preview_line: Option<(Vec3, Vec3)>,
+    preview_segments: Vec<(Vec3, Vec3)>,
     preview_version: u64,
+    box_step: Option<BoxCreateStep>,
+    box_base_start: Option<Vec3>,
+    box_base_end: Option<Vec3>,
+    box_base_size: Option<Vec3>,
+    box_height: Option<f32>,
 }
 
 impl Default for SceneModel {
@@ -57,8 +181,13 @@ impl Default for SceneModel {
             drag_offset: Vec3::ZERO,
             modifiers: SceneModifiers::default(),
             sphere_center: None,
-            preview_line: None,
+            preview_segments: Vec::new(),
             preview_version: 0,
+            box_step: None,
+            box_base_start: None,
+            box_base_end: None,
+            box_base_size: None,
+            box_height: None,
         }
     }
 }
@@ -88,6 +217,7 @@ pub struct SceneRequests {
 pub enum SceneInput {
     ModifiersChanged { shift: bool },
     KeyDelete,
+    KeyEscape,
     MouseWheel { delta_lines: f32 },
     MouseDownLeft { pos: ScenePoint },
     MouseUpLeft,
@@ -117,7 +247,7 @@ pub struct SceneView {
     pub grid_step: f32,
     pub entities: std::sync::Arc<Vec<SceneEntity>>,
     pub entities_version: u64,
-    pub preview_line: Option<(Vec3, Vec3)>,
+    pub preview_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
     pub preview_version: u64,
     pub selected: Option<u64>,
     pub axes_enabled: bool,
@@ -150,7 +280,7 @@ impl SceneModel {
             grid_step: config.grid_step,
             entities: std::sync::Arc::new(self.entities.clone()),
             entities_version: self.entities_version,
-            preview_line: self.preview_line,
+            preview_segments: std::sync::Arc::new(self.preview_segments.clone()),
             preview_version: self.preview_version,
             selected: self.selected,
             axes_enabled: config.axes_enabled,
@@ -190,6 +320,22 @@ impl SceneModel {
             SceneInput::ModifiersChanged { shift } => {
                 self.modifiers.shift = shift;
                 result.handled = false;
+                return result;
+            }
+            SceneInput::KeyEscape => {
+                if self.box_step.is_some() || self.sphere_center.is_some() {
+                    self.box_step = None;
+                    self.box_base_start = None;
+                    self.box_base_end = None;
+                    self.box_base_size = None;
+                    self.box_height = None;
+                    self.sphere_center = None;
+                    self.preview_segments.clear();
+                    self.preview_version = self.preview_version.wrapping_add(1);
+                    result.request_redraw = true;
+                    result.capture = true;
+                    result.handled = true;
+                }
                 return result;
             }
             SceneInput::KeyDelete => {
@@ -260,19 +406,140 @@ impl SceneModel {
                 }
             }
             SceneInput::MouseDownLeft { pos } => {
-                if config.tool == SceneTool::Sphere {
+                if config.tool == SceneTool::Box {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
-                            self.sphere_center = Some(hit_pos);
-                            self.preview_line = Some((hit_pos, hit_pos));
-                            self.preview_version = self.preview_version.wrapping_add(1);
-                            self.dragging = Dragging::None;
-                            self.last_cursor = Some(pos);
-                            result.request_redraw = true;
-                            result.capture = true;
-                            result.handled = true;
-                            return result;
+                            match self.box_step.unwrap_or(BoxCreateStep::BaseStart) {
+                                BoxCreateStep::BaseStart => {
+                                    self.box_step = Some(BoxCreateStep::BaseSize);
+                                    self.box_base_start = Some(hit_pos);
+                                    self.box_base_end = None;
+                                    self.box_base_size = None;
+                                    self.box_height = None;
+                                    let (u, v, _) = grid_axes(config.grid_plane);
+                                    let point_size = config.grid_step.max(0.05) * 0.3;
+                                    self.preview_segments = vec![
+                                        (hit_pos - u * point_size, hit_pos + u * point_size),
+                                        (hit_pos - v * point_size, hit_pos + v * point_size),
+                                    ];
+                                    self.preview_version =
+                                        self.preview_version.wrapping_add(1);
+                                    self.last_cursor = Some(pos);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                BoxCreateStep::BaseSize => {
+                                    if let Some(start) = self.box_base_start {
+                                        let (size, center) =
+                                            base_size_and_center(config.grid_plane, start, hit_pos);
+                                        self.box_base_size = Some(size);
+                                        self.box_base_end = Some(hit_pos);
+                                        self.box_height = Some(0.0);
+                                        self.box_step = Some(BoxCreateStep::Height);
+
+                                        let corners = rect_corners(config.grid_plane, start, hit_pos);
+                                        let mut segments = line_segments_for_rect(corners);
+                                        let (_, _, n) = grid_axes(config.grid_plane);
+                                        let top = center + n * 0.0;
+                                        segments.push((center, top));
+                                        self.preview_segments = segments;
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                                BoxCreateStep::Height => {
+                                    if let (Some(start), Some(end)) =
+                                        (self.box_base_start, self.box_base_end)
+                                    {
+                                        let (_, _, n) = grid_axes(config.grid_plane);
+                                        let (base_size, base_center) =
+                                            base_size_and_center(config.grid_plane, start, end);
+                                        let height = if let Some((origin, dir)) =
+                                            ray_from_cursor(pos, scene_bounds, &camera)
+                                        {
+                                            height_from_cursor(
+                                                origin,
+                                                dir,
+                                                base_center,
+                                                n,
+                                                camera.forward,
+                                            )
+                                        } else {
+                                            0.0
+                                        };
+
+                                        let h = height.max(0.05);
+                                        let size3 = match config.grid_plane {
+                                            GridPlane::XY => Vec3::new(base_size.x, base_size.y, h),
+                                            GridPlane::XZ => Vec3::new(base_size.x, h, base_size.z),
+                                            GridPlane::YZ => Vec3::new(h, base_size.y, base_size.z),
+                                        };
+                                        let center = match config.grid_plane {
+                                            GridPlane::XY => base_center + Vec3::new(0.0, 0.0, h * 0.5),
+                                            GridPlane::XZ => base_center + Vec3::new(0.0, h * 0.5, 0.0),
+                                            GridPlane::YZ => base_center + Vec3::new(h * 0.5, 0.0, 0.0),
+                                        };
+
+                                        let id = self.next_id;
+                                        self.next_id += 1;
+                                        self.entities.push(SceneEntity {
+                                            id,
+                                            kind: SolidKind::Box,
+                                            position: center,
+                                            size: size3,
+                                        });
+                                        self.entities_version =
+                                            self.entities_version.wrapping_add(1);
+                                        result.publish_entities = Some(
+                                            self.entities.iter().map(SceneEntityInfo::from).collect(),
+                                        );
+
+                                        self.selected = Some(id);
+                                        self.box_step = None;
+                                        self.box_base_start = None;
+                                        self.box_base_end = None;
+                                        self.box_base_size = None;
+                                        self.box_height = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                            }
                         }
+                    }
+                }
+
+                if config.tool == SceneTool::Sphere {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                                self.sphere_center = Some(hit_pos);
+                                let (u, v, _) = grid_axes(config.grid_plane);
+                                let point_size = config.grid_step.max(0.05) * 0.3;
+                                self.preview_segments = vec![
+                                    (hit_pos - u * point_size, hit_pos + u * point_size),
+                                    (hit_pos - v * point_size, hit_pos + v * point_size),
+                                ];
+                                self.preview_version = self.preview_version.wrapping_add(1);
+                                self.dragging = Dragging::None;
+                                self.last_cursor = Some(pos);
+                                result.request_redraw = true;
+                                result.capture = true;
+                                result.handled = true;
+                                return result;
+                            }
                     }
                 }
 
@@ -289,7 +556,7 @@ impl SceneModel {
                                 id,
                                 kind: create_kind,
                                 position: hit_pos,
-                                size: 0.2,
+                                size: Vec3::splat(0.2),
                             });
                             self.entities_version = self.entities_version.wrapping_add(1);
                             result.publish_entities = Some(
@@ -329,7 +596,7 @@ impl SceneModel {
                                     id,
                                     kind: SolidKind::Sphere,
                                     position: center,
-                                    size: radius * 2.0,
+                                    size: Vec3::splat(radius * 2.0),
                                 });
                                 self.entities_version = self.entities_version.wrapping_add(1);
                                 result.publish_entities = Some(
@@ -337,7 +604,7 @@ impl SceneModel {
                                 );
                                 self.selected = Some(id);
                                 self.sphere_center = None;
-                                self.preview_line = None;
+                                self.preview_segments.clear();
                                 self.preview_version = self.preview_version.wrapping_add(1);
                                 self.last_cursor = Some(pos);
                                 result.request_redraw = true;
@@ -360,11 +627,77 @@ impl SceneModel {
                 result.handled = true;
             }
             SceneInput::MouseMove { pos } => {
+                if config.tool == SceneTool::Box {
+                    if let Some(step) = self.box_step {
+                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(hit_pos) =
+                                intersect_plane(config.grid_plane, origin, dir)
+                            {
+                                match step {
+                                    BoxCreateStep::BaseSize => {
+                                        if let Some(start) = self.box_base_start {
+                                            let corners = rect_corners(config.grid_plane, start, hit_pos);
+                                            let mut segments = line_segments_for_rect(corners);
+                                            let (u, v, _) = grid_axes(config.grid_plane);
+                                            let point_size = config.grid_step.max(0.05) * 0.3;
+                                            segments.push((start - u * point_size, start + u * point_size));
+                                            segments.push((start - v * point_size, start + v * point_size));
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    BoxCreateStep::Height => {
+                                        if let (Some(start), Some(end)) =
+                                            (self.box_base_start, self.box_base_end)
+                                        {
+                                            let (_, base_center) =
+                                                base_size_and_center(config.grid_plane, start, end);
+                                            let (_, _, n) = grid_axes(config.grid_plane);
+                                            let height = height_from_cursor(
+                                                origin,
+                                                dir,
+                                                base_center,
+                                                n,
+                                                camera.forward,
+                                            );
+                                            let top = base_center + n * height;
+                                            let corners = rect_corners(config.grid_plane, start, end);
+                                            let mut segments = line_segments_for_rect(corners);
+                                            segments.push((base_center, top));
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    BoxCreateStep::BaseStart => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if config.tool == SceneTool::Sphere {
                     if let Some(center) = self.sphere_center {
                         if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                             if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
-                                self.preview_line = Some((center, hit_pos));
+                                let (u, v, _) = grid_axes(config.grid_plane);
+                                let point_size = config.grid_step.max(0.05) * 0.3;
+                                self.preview_segments = vec![
+                                    (center - u * point_size, center + u * point_size),
+                                    (center - v * point_size, center + v * point_size),
+                                    (center, hit_pos),
+                                ];
                                 self.preview_version = self.preview_version.wrapping_add(1);
                                 self.last_cursor = Some(pos);
                                 result.request_redraw = true;
@@ -413,7 +746,7 @@ impl SceneModel {
                                     {
                                         let diff = hit_pos - start;
                                         let dist = diff.length().max(0.1);
-                                        entity.size = dist;
+                                        entity.size = Vec3::splat(dist);
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
                                         result.publish_entities = Some(

@@ -212,10 +212,12 @@ impl<'a> EntityTree<'a> {
 
             rows.push(Row {
                 label: format!(
-                    "Solid #{} {} (size {:.2})",
+                    "Solid #{} {} (size {:.2}, {:.2}, {:.2})",
                     entity.id,
                     solid_label(entity.kind),
-                    entity.size
+                    entity.size[0],
+                    entity.size[1],
+                    entity.size[2]
                 ),
                 indent: 0,
                 toggle: Some((solid_key, solid_expanded)),
@@ -571,13 +573,13 @@ fn solid_label(kind: SolidKind) -> &'static str {
 }
 
 fn entity_solid(entity: &SceneEntityInfo) -> Solid {
-    let size = entity.size as f64;
+    let size = entity.size;
     let solid = match entity.kind {
-        SolidKind::Box => cad::box_solid(size, size, size),
-        SolidKind::Sphere => cad::sphere(size * 0.5),
-        SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
-        SolidKind::Cone => cad::cone_solid(size, size * 0.4),
-        SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
+        SolidKind::Box => cad::box_solid(size[0] as f64, size[1] as f64, size[2] as f64),
+        SolidKind::Sphere => cad::sphere((size[0] * 0.5) as f64),
+        SolidKind::Cylinder => cad::cylinder_solid(size[1] as f64, (size[0] * 0.35) as f64),
+        SolidKind::Cone => cad::cone_solid(size[1] as f64, (size[0] * 0.4) as f64),
+        SolidKind::Torus => cad::torus_solid((size[0] * 0.7) as f64, (size[0] * 0.25) as f64),
     };
     solid
 }
@@ -734,6 +736,16 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             ) {
                 let result = state.model.update(
                     SceneInput::KeyDelete,
+                    to_scene_rect(bounds),
+                    config,
+                    requests,
+                );
+                return scene_action(result, &self.on_entities_snapshot);
+            }
+
+            if matches!(key, iced_keyboard::Key::Named(iced_keyboard::key::Named::Escape)) {
+                let result = state.model.update(
+                    SceneInput::KeyEscape,
                     to_scene_rect(bounds),
                     config,
                     requests,

@@ -214,7 +214,7 @@ impl App {
             tool: Tool::Line,
             mode: BooleanMode::Add,
             scene_show_grid: true,
-            scene_grid_plane: GridPlane::XY,
+            scene_grid_plane: GridPlane::XZ,
             scene_grid_extent: 2.5,
             scene_grid_step: 0.25,
             scene_tool: SceneTool::Select,

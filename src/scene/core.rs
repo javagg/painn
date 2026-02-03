@@ -194,12 +194,13 @@ pub(crate) fn intersect_plane(plane: GridPlane, origin: Vec3, dir: Vec3) -> Opti
 }
 
 pub(crate) fn entity_radius(entity: &SceneEntity) -> f32 {
+    let max_size = entity.size.x.max(entity.size.y).max(entity.size.z);
     match entity.kind {
-        SolidKind::Box => entity.size * 0.7,
-        SolidKind::Sphere => entity.size * 0.5,
-        SolidKind::Cylinder => entity.size * 0.6,
-        SolidKind::Cone => entity.size * 0.6,
-        SolidKind::Torus => entity.size * 0.8,
+        SolidKind::Box => max_size * 0.7,
+        SolidKind::Sphere => max_size * 0.5,
+        SolidKind::Cylinder => max_size * 0.6,
+        SolidKind::Cone => max_size * 0.6,
+        SolidKind::Torus => max_size * 0.8,
     }
 }
 
@@ -282,13 +283,13 @@ fn translate_mesh(mesh: &mut PolygonMesh, offset: Vec3) {
 }
 
 fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
-    let size = entity.size as f64;
+    let size = entity.size;
     let solid = match entity.kind {
-        SolidKind::Box => cad::box_solid(size, size, size),
-        SolidKind::Sphere => cad::sphere(size * 0.5),
-        SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
-        SolidKind::Cone => cad::cone_solid(size, size * 0.4),
-        SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
+        SolidKind::Box => cad::box_solid(size.x as f64, size.y as f64, size.z as f64),
+        SolidKind::Sphere => cad::sphere((size.x * 0.5) as f64),
+        SolidKind::Cylinder => cad::cylinder_solid(size.y as f64, (size.x * 0.35) as f64),
+        SolidKind::Cone => cad::cone_solid(size.y as f64, (size.x * 0.4) as f64),
+        SolidKind::Torus => cad::torus_solid((size.x * 0.7) as f64, (size.x * 0.25) as f64),
     };
 
     let mut mesh = cad::to_mesh(&solid);
@@ -656,7 +657,7 @@ pub struct SceneEntity {
     pub(crate) id: u64,
     pub(crate) kind: SolidKind,
     pub(crate) position: Vec3,
-    pub(crate) size: f32,
+    pub(crate) size: Vec3,
 }
 
 #[derive(Debug, Clone)]
@@ -665,7 +666,7 @@ pub struct SceneEntityInfo {
     pub id: u64,
     pub kind: SolidKind,
     pub position: [f32; 3],
-    pub size: f32,
+    pub size: [f32; 3],
 }
 
 impl From<&SceneEntity> for SceneEntityInfo {
@@ -674,7 +675,7 @@ impl From<&SceneEntity> for SceneEntityInfo {
             id: e.id,
             kind: e.kind,
             position: e.position.to_array(),
-            size: e.size,
+            size: e.size.to_array(),
         }
     }
 }

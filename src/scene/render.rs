@@ -906,25 +906,29 @@ impl SceneView {
 
         if pipeline.preview_version != self.preview_version {
             pipeline.preview_version = self.preview_version;
-            if let Some((start, end)) = self.preview_line {
-                let key = PreviewKey { start, end };
-                if pipeline.preview_key != Some(key) {
-                    pipeline.preview_key = Some(key);
-                    let vertices = [
-                        GridVertex { position: start.to_array() },
-                        GridVertex { position: end.to_array() },
-                    ];
-                    pipeline.preview_vertices =
-                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("scene_preview_vertices"),
-                            contents: bytemuck::cast_slice(&vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-                    pipeline.preview_vertex_count = 2;
-                }
-            } else {
+            let segments = self.preview_segments.as_ref();
+            if segments.is_empty() {
                 pipeline.preview_key = None;
                 pipeline.preview_vertex_count = 0;
+            } else {
+                let mut vertices: Vec<GridVertex> = Vec::with_capacity(segments.len() * 2);
+                for (a, b) in segments.iter() {
+                    vertices.push(GridVertex {
+                        position: a.to_array(),
+                    });
+                    vertices.push(GridVertex {
+                        position: b.to_array(),
+                    });
+                }
+
+                pipeline.preview_vertices =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("scene_preview_vertices"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                pipeline.preview_vertex_count = vertices.len() as u32;
+                pipeline.preview_key = None;
             }
         }
 
@@ -935,7 +939,7 @@ impl SceneView {
                 .map(|e| HighlightKey {
                     id: e.id,
                     position: e.position,
-                    size: e.size,
+                    size: e.size.x.max(e.size.y).max(e.size.z),
                 })
         });
 
