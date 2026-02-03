@@ -58,6 +58,11 @@ enum Tab {
     Scene,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SceneSidebarTab {
+    Entities,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     TabChanged(Tab),
@@ -102,6 +107,7 @@ enum Message {
     // Scene actions from sidebar
     SceneSelectEntity(u64),
     SceneFocusEntity(u64),
+    SceneSidebarTabSelected(SceneSidebarTab),
     SceneZoomIn,
     SceneZoomOut,
     LoadGmsh,
@@ -421,6 +427,9 @@ impl App {
             Message::SceneFocusEntity(id) => {
                 self.scene_request_focus_id = Some(id);
                 self.invalidate();
+            }
+            Message::SceneSidebarTabSelected(_tab) => {
+                // Single-tab sidebar currently; no state update required.
             }
             Message::SceneZoomIn => {
                 self.scene_zoom_factor = 1.1;

@@ -13,6 +13,8 @@ use iced_aw::widgets::color_picker;
 use std::collections::HashSet;
 use truck_modeling::Solid;
 use iced::advanced::text::Renderer as _;
+use iced_aw::widget::sidebar::{SidebarPosition, SidebarWithContent, TabLabel};
+
 
 use crate::cad;
 use crate::scene::{
@@ -151,7 +153,19 @@ pub fn tab_button<'a>(
 // Scene sidebar: entity list with actions
 pub fn build_scene_sidebar<'a>(entities: &'a [SceneEntityInfo]) -> Element<'a, crate::Message> {
     let tree = EntityTree::new(entities);
-    container(scrollable(tree))
+    let content = container(scrollable(tree))
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    SidebarWithContent::new(crate::Message::SceneSidebarTabSelected)
+        .push(
+            crate::SceneSidebarTab::Entities,
+            TabLabel::Text(String::from("Entities")),
+            content,
+        )
+        .set_active_tab(&crate::SceneSidebarTab::Entities)
+        .sidebar_width(Length::Fixed(120.0))
+        .sidebar_position(SidebarPosition::Start)
         .width(Length::Fixed(360.0))
         .height(Length::Fill)
         .into()
