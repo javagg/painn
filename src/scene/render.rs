@@ -28,6 +28,10 @@ pub(crate) struct HighlightKey {
 
 #[derive(Debug)]
 pub struct Pipeline {
+    pub(crate) background_pipeline: wgpu::RenderPipeline,
+    pub(crate) background_uniforms: wgpu::Buffer,
+    pub(crate) background_bind_group: wgpu::BindGroup,
+    pub(crate) background_color: [f32; 4],
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) vertices: wgpu::Buffer,
     pub(crate) indices: wgpu::Buffer,
@@ -57,6 +61,12 @@ pub struct Pipeline {
     pub(crate) axes_vertex_count: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BackgroundUniform {
+    color: [f32; 4],
+}
+
 impl Pipeline {
     pub fn create(
         device: &wgpu::Device,
@@ -64,6 +74,37 @@ impl Pipeline {
         format: wgpu::TextureFormat,
     ) -> Self {
         const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+
+        let background_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_background_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct BgUniform {
+    color: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> bg: BgUniform;
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    let p = positions[index];
+    return vec4<f32>(p, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return bg.color;
+}
+"#
+                    .into(),
+            ),
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_mesh_shader"),
@@ -239,6 +280,21 @@ fn fs_main() -> @location(0) vec4<f32> {
                 }],
             });
 
+        let background_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("scene_background_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
         let initial_uniforms = Uniforms {
             model_view: Mat4::IDENTITY.to_cols_array_2d(),
             mvp: Mat4::IDENTITY.to_cols_array_2d(),
@@ -255,6 +311,23 @@ fn fs_main() -> @location(0) vec4<f32> {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniforms.as_entire_binding(),
+            }],
+        });
+
+        let initial_background = BackgroundUniform {
+            color: [0.0, 0.0, 0.0, 1.0],
+        };
+        let background_uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("scene_background_uniforms"),
+            contents: bytemuck::bytes_of(&initial_background),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let background_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene_background_bind_group"),
+            layout: &background_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: background_uniforms.as_entire_binding(),
             }],
         });
 
@@ -276,6 +349,53 @@ fn fs_main() -> @location(0) vec4<f32> {
             label: Some("scene_mesh_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
+        });
+
+        let background_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("scene_background_pipeline_layout"),
+                bind_group_layouts: &[&background_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let background_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_background_pipeline"),
+            layout: Some(&background_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &background_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &background_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -533,6 +653,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
+            background_pipeline,
+            background_uniforms,
+            background_bind_group,
+            background_color: [0.0, 0.0, 0.0, 1.0],
             pipeline,
             vertices: vertex_buffer,
             indices: index_buffer,
@@ -852,6 +976,18 @@ impl SceneView {
                 pipeline.highlight_vertex_count = 0;
             }
         }
+
+        if pipeline.background_color != self.background {
+            pipeline.background_color = self.background;
+            let uniforms = BackgroundUniform {
+                color: self.background,
+            };
+            queue.write_buffer(
+                &pipeline.background_uniforms,
+                0,
+                bytemuck::bytes_of(&uniforms),
+            );
+        }
     }
 
     pub fn do_render(
@@ -892,6 +1028,10 @@ impl SceneView {
             clip_bounds.width,
             clip_bounds.height,
         );
+
+        render_pass.set_pipeline(&pipeline.background_pipeline);
+        render_pass.set_bind_group(0, &pipeline.background_bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
 
         if pipeline.grid_vertex_count > 0 {
             render_pass.set_pipeline(&pipeline.grid_pipeline);

@@ -75,6 +75,7 @@ pub struct SceneConfig {
     pub axes_enabled: bool,
     pub axes_size: f32,
     pub axes_margin: f32,
+    pub background: [f32; 4],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +123,7 @@ pub struct SceneView {
     pub axes_enabled: bool,
     pub axes_size: f32,
     pub axes_margin: f32,
+    pub background: [f32; 4],
 }
 
 impl SceneModel {
@@ -154,6 +156,7 @@ impl SceneModel {
             axes_enabled: config.axes_enabled,
             axes_size: config.axes_size,
             axes_margin: config.axes_margin,
+            background: config.background,
         }
     }
 

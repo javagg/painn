@@ -74,6 +74,9 @@ enum Message {
     SceneAxesToggle,
     SceneAxesSizeChanged(f32),
     SceneAxesMarginChanged(f32),
+    SceneBackgroundPickerOpened,
+    SceneBackgroundPickerCancelled,
+    SceneBackgroundChanged(Color),
     StrokeWidthChanged(f32),
     StrokeColorChanged(Color),
     FillColorChanged(Option<Color>),
@@ -82,7 +85,6 @@ enum Message {
     Undo,
     DeleteSelected,
     Clear,
-    ToggleMenuBar,
     // File
     OpenFile,
     SaveFile,
@@ -180,6 +182,8 @@ struct App {
     scene_axes_enabled: bool,
     scene_axes_size: f32,
     scene_axes_margin: f32,
+    scene_bg_color: Color,
+    scene_bg_picker_open: bool,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -219,6 +223,8 @@ impl App {
             scene_axes_enabled: true,
             scene_axes_size: 100.0,
             scene_axes_margin: 8.0,
+            scene_bg_color: Color::from_rgb8(0x1E, 0x1F, 0x24),
+            scene_bg_picker_open: false,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -231,7 +237,7 @@ impl App {
             dragging: false,
             drag_last: None,
             draft: Draft::default(),
-            show_menubar: false,
+            show_menubar: true,
             scene_entities: Vec::new(),
             scene_request_select_id: None,
             scene_request_focus_id: None,
@@ -312,6 +318,17 @@ impl App {
                 self.scene_axes_margin = v.clamp(0.0, 64.0);
                 self.invalidate();
             }
+            Message::SceneBackgroundPickerOpened => {
+                self.scene_bg_picker_open = true;
+            }
+            Message::SceneBackgroundPickerCancelled => {
+                self.scene_bg_picker_open = false;
+            }
+            Message::SceneBackgroundChanged(color) => {
+                self.scene_bg_color = color;
+                self.scene_bg_picker_open = false;
+                self.invalidate();
+            }
             Message::StrokeWidthChanged(w) => {
                 self.stroke_width = w;
                 if let Some(index) = self.selected {
@@ -335,10 +352,6 @@ impl App {
             }
             Message::ToggleGrid => {
                 self.show_grid = !self.show_grid;
-                self.invalidate();
-            }
-            Message::ToggleMenuBar => {
-                self.show_menubar = !self.show_menubar;
                 self.invalidate();
             }
             Message::ResetZoom => {
@@ -794,7 +807,6 @@ impl App {
             self.mode,
             self.stroke_width,
             self.show_grid,
-            self.show_menubar,
             self.selected,
         );
         let stroke_row = controls::stroke_row();
@@ -814,7 +826,8 @@ impl App {
             wrap_canvas_event,
         );
 
-        let draw_tab = column![toolbar, stroke_row, fill_row, board, status]
+        let draw_tab = column![
+            toolbar, stroke_row, fill_row, board, status]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
@@ -831,6 +844,8 @@ impl App {
             self.scene_axes_margin,
             self.scene_grid_extent,
             self.scene_grid_step,
+            self.scene_bg_color,
+            self.scene_bg_picker_open,
             self.gmsh_status.as_deref(),
         );
 
@@ -845,6 +860,7 @@ impl App {
             self.scene_axes_enabled,
             self.scene_axes_size,
             self.scene_axes_margin,
+            self.scene_bg_color,
             self.scene_request_select_id,
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),
@@ -862,10 +878,7 @@ impl App {
             Tab::Scene => scene_tab.into(),
         };
 
-        let mut top = column![tab_bar];
-        if let Some(m) = menu_bar {
-            top = top.push(m);
-        }
+        let mut top = column![menu_bar, tab_bar];
         top = top.push(content);
         top
             .spacing(10)

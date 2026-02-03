@@ -3,11 +3,13 @@ use iced::widget::shader::{self, Viewport};
 use iced::{alignment, Color, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme};
 use iced::keyboard as iced_keyboard;
 use iced::mouse as iced_mouse;
-use iced::wgpu;
+use wgpu;
 use iced::advanced::{
     layout, mouse, renderer, text as advanced_text, widget, Clipboard, Layout, Shell, Widget,
     Renderer as AdvancedRenderer,
 };
+use iced_aw::widgets::color_picker;
+
 use std::collections::HashSet;
 use truck_modeling::Solid;
 use iced::advanced::text::Renderer as _;
@@ -588,6 +590,10 @@ fn to_scene_rect(r: Rectangle) -> SceneRect {
     SceneRect::new(r.x, r.y, r.width, r.height)
 }
 
+fn color_to_rgba(color: Color) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a]
+}
+
 impl shader::Pipeline for Pipeline {
     fn new(
         device: &wgpu::Device,
@@ -660,6 +666,7 @@ struct Scene<Message> {
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    background: [f32; 4],
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
@@ -700,6 +707,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             axes_enabled: self.axes_enabled,
             axes_size: self.axes_size,
             axes_margin: self.axes_margin,
+            background: self.background,
         };
         let requests = SceneRequests {
             select_id: self.request_select_id,
@@ -791,6 +799,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             axes_enabled: self.axes_enabled,
             axes_size: self.axes_size,
             axes_margin: self.axes_margin,
+            background: self.background,
         };
         Primitive {
             view: state.model.view(config),
@@ -851,6 +860,7 @@ pub fn scene_widget<'a, Message>(
     axes_enabled: bool,
     axes_size: f32,
     axes_margin: f32,
+    background: Color,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
@@ -869,6 +879,7 @@ where
         axes_enabled,
         axes_size,
         axes_margin,
+        background: color_to_rgba(background),
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         request_select_id,
         request_focus_id,
@@ -884,7 +895,6 @@ pub fn draw_toolbar<'a>(
     mode: crate::BooleanMode,
     stroke_width: f32,
     show_grid: bool,
-    show_menubar: bool,
     selected: Option<usize>,
 ) -> Element<'a, crate::Message> {
     row![
@@ -901,8 +911,6 @@ pub fn draw_toolbar<'a>(
         button(if show_grid { "Grid: On" } else { "Grid: Off" })
             .on_press(crate::Message::ToggleGrid),
         button("Reset Zoom").on_press(crate::Message::ResetZoom),
-        button(if show_menubar { "MenuBar: On" } else { "MenuBar: Off" })
-            .on_press(crate::Message::ToggleMenuBar),
         button("Undo").on_press(crate::Message::Undo),
         button("Delete Selected")
             .on_press_maybe(selected.map(|_| crate::Message::DeleteSelected)),
@@ -981,8 +989,18 @@ pub fn scene_controls<'a>(
     scene_axes_margin: f32,
     scene_grid_extent: f32,
     scene_grid_step: f32,
+    scene_bg_color: Color,
+    scene_bg_picker_open: bool,
     gmsh_status: Option<&'a str>,
 ) -> Element<'a, crate::Message> {
+    let background_picker = color_picker(
+        scene_bg_picker_open,
+        scene_bg_color,
+        button(text("背景色")).on_press(crate::Message::SceneBackgroundPickerOpened),
+        crate::Message::SceneBackgroundPickerCancelled,
+        crate::Message::SceneBackgroundChanged,
+    );
+
     column![
         row![
             button("Load Gmsh...").on_press(crate::Message::LoadGmsh),
@@ -1050,6 +1068,9 @@ pub fn scene_controls<'a>(
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
+        row![text("背景"), background_picker]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
         row![
             text("Range"),
             slider(0.5..=10.0, scene_grid_extent, crate::Message::SceneGridExtentChanged)
