@@ -139,6 +139,24 @@ fn line_segments_for_rect(corners: [Vec3; 4]) -> Vec<(Vec3, Vec3)> {
     ]
 }
 
+fn circle_segments(plane: GridPlane, center: Vec3, radius: f32, steps: usize) -> Vec<(Vec3, Vec3)> {
+    let (u, v, _) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut points: Vec<Vec3> = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius) + v * (s * radius));
+    }
+    let mut segments = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let a = points[i];
+        let b = points[(i + 1) % steps];
+        segments.push((a, b));
+    }
+    segments
+}
+
 #[derive(Debug, Clone)]
 pub struct SceneModel {
     target: Vec3,
@@ -524,7 +542,31 @@ impl SceneModel {
 
                 if config.tool == SceneTool::Sphere {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
-                            if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            if let Some(center) = self.sphere_center {
+                                let radius = (hit_pos - center).length().max(0.05);
+                                let id = self.next_id;
+                                self.next_id += 1;
+                                self.entities.push(SceneEntity {
+                                    id,
+                                    kind: SolidKind::Sphere,
+                                    position: center,
+                                    size: Vec3::splat(radius * 2.0),
+                                });
+                                self.entities_version = self.entities_version.wrapping_add(1);
+                                result.publish_entities = Some(
+                                    self.entities.iter().map(SceneEntityInfo::from).collect(),
+                                );
+                                self.selected = Some(id);
+                                self.sphere_center = None;
+                                self.preview_segments.clear();
+                                self.preview_version = self.preview_version.wrapping_add(1);
+                                self.last_cursor = Some(pos);
+                                result.request_redraw = true;
+                                result.capture = true;
+                                result.handled = true;
+                                return result;
+                            } else {
                                 self.sphere_center = Some(hit_pos);
                                 let (u, v, _) = grid_axes(config.grid_plane);
                                 let point_size = config.grid_step.max(0.05) * 0.3;
@@ -540,6 +582,7 @@ impl SceneModel {
                                 result.handled = true;
                                 return result;
                             }
+                        }
                     }
                 }
 
@@ -585,37 +628,6 @@ impl SceneModel {
                 result.handled = true;
             }
             SceneInput::MouseDownRight { pos } => {
-                if config.tool == SceneTool::Sphere {
-                    if let Some(center) = self.sphere_center {
-                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
-                            if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
-                                let radius = (hit_pos - center).length().max(0.05);
-                                let id = self.next_id;
-                                self.next_id += 1;
-                                self.entities.push(SceneEntity {
-                                    id,
-                                    kind: SolidKind::Sphere,
-                                    position: center,
-                                    size: Vec3::splat(radius * 2.0),
-                                });
-                                self.entities_version = self.entities_version.wrapping_add(1);
-                                result.publish_entities = Some(
-                                    self.entities.iter().map(SceneEntityInfo::from).collect(),
-                                );
-                                self.selected = Some(id);
-                                self.sphere_center = None;
-                                self.preview_segments.clear();
-                                self.preview_version = self.preview_version.wrapping_add(1);
-                                self.last_cursor = Some(pos);
-                                result.request_redraw = true;
-                                result.capture = true;
-                                result.handled = true;
-                                return result;
-                            }
-                        }
-                    }
-                }
-
                 if self.modifiers.shift {
                     self.dragging = Dragging::Pan;
                 } else {
@@ -691,13 +703,18 @@ impl SceneModel {
                     if let Some(center) = self.sphere_center {
                         if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                             if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                                let radius = (hit_pos - center).length().max(0.05);
                                 let (u, v, _) = grid_axes(config.grid_plane);
                                 let point_size = config.grid_step.max(0.05) * 0.3;
-                                self.preview_segments = vec![
-                                    (center - u * point_size, center + u * point_size),
-                                    (center - v * point_size, center + v * point_size),
-                                    (center, hit_pos),
-                                ];
+                                let mut segments = circle_segments(
+                                    config.grid_plane,
+                                    center,
+                                    radius,
+                                    48,
+                                );
+                                segments.push((center - u * point_size, center + u * point_size));
+                                segments.push((center - v * point_size, center + v * point_size));
+                                self.preview_segments = segments;
                                 self.preview_version = self.preview_version.wrapping_add(1);
                                 self.last_cursor = Some(pos);
                                 result.request_redraw = true;
