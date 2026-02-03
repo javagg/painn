@@ -116,7 +116,7 @@ fn pick_entity(
     camera: &Camera,
     entities: &[SceneEntity],
 ) -> Option<u64> {
-    let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
+    let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, camera.up);
     let proj = match camera.mode {
         CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),
         CameraMode::Orthographic => {
@@ -1280,7 +1280,7 @@ impl shader::Primitive for Primitive {
             self.camera_mode,
         );
 
-        let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
+        let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, camera.up);
 
         let proj = match camera.mode {
             CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),

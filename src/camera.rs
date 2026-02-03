@@ -54,10 +54,10 @@ pub fn camera_from_params(
     let distance = distance.clamp(0.1, 200.0);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
-    let offset = Vec3::new(distance * cp * sy, distance * sp, distance * cp * cy);
+    let offset = Vec3::new(distance * cp * sy, distance * cp * cy, distance * sp);
     let eye = target + offset;
     let forward = (target - eye).normalize_or_zero();
-    let world_up = Vec3::Y;
+    let world_up = Vec3::Z;
     let right = forward.cross(world_up).normalize_or_zero();
     let up = right.cross(forward);
     let ortho_half_h = match mode {
