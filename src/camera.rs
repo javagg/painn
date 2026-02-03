@@ -34,6 +34,8 @@ pub struct Camera {
     pub fovy: f32,
     pub mode: CameraMode,
     pub ortho_half_h: f32,
+    pub near: f32,
+    pub far: f32,
 }
 
 pub fn camera_from_params(
@@ -51,13 +53,15 @@ pub fn camera_from_params(
     };
 
     let fovy = 45.0_f32.to_radians();
+    let near = 0.01_f32;
+    let far = 1000.0_f32;
     let distance = distance.clamp(0.1, 200.0);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
-    let offset = Vec3::new(distance * cp * sy, distance * cp * cy, distance * sp);
+    let offset = Vec3::new(distance * cp * sy, distance * sp, distance * cp * cy);
     let eye = target + offset;
     let forward = (target - eye).normalize_or_zero();
-    let world_up = Vec3::Z;
+    let world_up = Vec3::Y;
     let right = forward.cross(world_up).normalize_or_zero();
     let up = right.cross(forward);
     let ortho_half_h = match mode {
@@ -74,6 +78,8 @@ pub fn camera_from_params(
         fovy,
         mode,
         ortho_half_h,
+        near,
+        far,
     }
 }
 

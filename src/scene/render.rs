@@ -763,12 +763,12 @@ impl SceneView {
 
         let proj = match camera.mode {
             crate::scene::CameraMode::Perspective => {
-                Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0)
+                Mat4::perspective_rh(camera.fovy, camera.aspect, camera.near, camera.far)
             }
             crate::scene::CameraMode::Orthographic => {
                 let half_h = camera.ortho_half_h;
                 let half_w = half_h * camera.aspect;
-                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, camera.near, camera.far)
             }
         };
 

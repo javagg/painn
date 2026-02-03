@@ -90,6 +90,8 @@ pub(crate) struct Camera {
     pub(crate) fovy: f32,
     pub(crate) mode: CameraMode,
     pub(crate) ortho_half_h: f32,
+    pub(crate) near: f32,
+    pub(crate) far: f32,
 }
 
 pub(crate) fn camera_from_params(
@@ -107,6 +109,8 @@ pub(crate) fn camera_from_params(
     };
 
     let fovy = 45.0_f32.to_radians();
+    let near = 0.02_f32;
+    let far = 500.0_f32;
     let distance = distance.clamp(0.1, 200.0);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
@@ -130,6 +134,8 @@ pub(crate) fn camera_from_params(
         fovy,
         mode,
         ortho_half_h,
+        near,
+        far,
     }
 }
 
@@ -222,11 +228,13 @@ pub(crate) fn pick_entity(
 ) -> Option<u64> {
     let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
     let proj = match camera.mode {
-        CameraMode::Perspective => Mat4::perspective_rh(camera.fovy, camera.aspect, 0.02, 500.0),
+        CameraMode::Perspective => {
+            Mat4::perspective_rh(camera.fovy, camera.aspect, camera.near, camera.far)
+        }
         CameraMode::Orthographic => {
             let half_h = camera.ortho_half_h;
             let half_w = half_h * camera.aspect;
-            Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.02, 500.0)
+            Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, camera.near, camera.far)
         }
     };
     let mvp = proj * view;
