@@ -8,17 +8,15 @@ use iced::advanced::{
     layout, mouse, renderer, text as advanced_text, widget, Clipboard, Layout, Shell, Widget,
     Renderer as AdvancedRenderer,
 };
-use glam::Mat4;
 use std::collections::HashSet;
 use truck_modeling::Solid;
-use wgpu::util::DeviceExt;
 use iced::advanced::text::Renderer as _;
 
 use crate::cad;
 use crate::scene::{
-    AxesVertex, CameraMode, CameraPreset, GridPlane, GridVertex, Pipeline, SceneConfig,
-    SceneEntityInfo, SceneInput, SceneModel, ScenePoint, SceneRect, SceneRequests, SceneTool,
-    SceneUpdateResult, SceneView, SolidKind, Uniforms, Vertex,
+    CameraMode, CameraPreset, GridPlane, Pipeline, SceneConfig, SceneEntityInfo, SceneInput,
+    SceneModel, ScenePoint, SceneRect, SceneRequests, SceneTool, SceneUpdateResult, SceneView,
+    SolidKind,
 };
 use iced_aw::menu;
 

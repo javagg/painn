@@ -18,10 +18,9 @@ pub fn to_mesh(solid: &Solid) -> PolygonMesh {
     mesh
 }
 
-pub fn load_gmsh_mesh(path: &Path) -> std::result::Result<PolygonMesh, String> {
-    let msh_bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+pub fn load_gmsh_mesh_from_bytes(msh_bytes: &[u8]) -> std::result::Result<PolygonMesh, String> {
     let msh: msh::MshFile<u64, i32, f64> =
-        msh::parse_msh_bytes(msh_bytes.as_slice()).map_err(|e| e.to_string())?;
+        msh::parse_msh_bytes(msh_bytes).map_err(|e| e.to_string())?;
 
     let nodes = msh
         .data
@@ -135,6 +134,11 @@ pub fn load_gmsh_mesh(path: &Path) -> std::result::Result<PolygonMesh, String> {
     Ok(PolygonMesh::new(attributes, faces))
 }
 
+pub fn load_gmsh_mesh(path: &Path) -> std::result::Result<PolygonMesh, String> {
+    let msh_bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    load_gmsh_mesh_from_bytes(msh_bytes.as_slice())
+}
+
 pub fn box_solid(width: f64, height: f64, depth: f64) -> Solid {
     let vertex: Vertex = builder::vertex(Point3::new(-width / 2.0, -height / 2.0, -depth / 2.0));
     let edge: Edge = builder::tsweep(&vertex, Vector3::new(0.0, 0.0, depth));
@@ -171,6 +175,7 @@ pub fn torus_solid(major: f64, minor: f64) -> Solid {
 }
 
 /// Construct a cube
+#[allow(dead_code)]
 pub fn cube() -> Solid {
     // put a vertex at the point (-1, 0, -1)
     let vertex: Vertex = builder::vertex(Point3::new(-1.0, 0.0, -1.0));
@@ -199,6 +204,7 @@ pub fn cube() -> Solid {
 
 
 // modeling a torus
+#[allow(dead_code)]
 pub fn torus() -> Solid {
     // put a vertex at the point (0, 0, 1).
     let vertex = builder::vertex(Point3::new(0.0, 0.0, 1.0));
@@ -234,6 +240,7 @@ pub fn torus() -> Solid {
 // - height: height of the body
 // - width: width of the body
 // - thickness: thickness of the body
+#[allow(dead_code)]
 fn body_shell(bottom: f64, height: f64, width: f64, thickness: f64) -> Shell {
     // draw a circle arc
     let vertex0 = builder::vertex(Point3::new(-width / 2.0, bottom, thickness / 4.0));
@@ -266,6 +273,7 @@ fn cylinder(bottom: f64, height: f64, radius: f64) -> Shell {
 }
 
 // sew the body and the neck
+#[allow(dead_code)]
 fn glue_body_neck(body: &mut Shell, neck: Shell) {
     // get the body's ceiling
     let body_ceiling = body.last_mut().unwrap();
@@ -279,6 +287,7 @@ fn glue_body_neck(body: &mut Shell, neck: Shell) {
 
 
 // modeling a bottle
+#[allow(dead_code)]
 pub fn bottle(height: f64, width: f64, thickness: f64) -> Solid {
     // create the body of the bottle
     let mut body = body_shell(-height / 2.0, height, width, thickness);

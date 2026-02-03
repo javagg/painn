@@ -119,14 +119,17 @@ struct GmshLoadResult {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
-    let file = rfd::FileDialog::new()
+    let file = rfd::AsyncFileDialog::new()
         .add_filter("Gmsh", &["msh"])
         .set_title("Open Gmsh Mesh")
-        .pick_file();
+        .pick_file()
+        .await;
 
-    let Some(path) = file else {
+    let Some(handle) = file else {
         return Ok(None);
     };
+
+    let path = handle.path().to_path_buf();
 
     let mesh = cad::load_gmsh_mesh(&path)?;
     Ok(Some(GmshLoadResult {
@@ -137,7 +140,21 @@ async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
 
 #[cfg(target_arch = "wasm32")]
 async fn pick_and_load_gmsh() -> Result<Option<GmshLoadResult>, String> {
-    Ok(None)
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("Gmsh", &["msh"])
+        .set_title("Open Gmsh Mesh")
+        .pick_file()
+        .await;
+
+    let Some(handle) = file else {
+        return Ok(None);
+    };
+
+    let bytes = handle.read().await;
+    let mesh = cad::load_gmsh_mesh_from_bytes(&bytes)?;
+    let label = handle.file_name();
+
+    Ok(Some(GmshLoadResult { mesh, label }))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
