@@ -27,6 +27,13 @@ enum BoxCreateStep {
     Height,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CylinderCreateStep {
+    BaseCenter,
+    BaseRadius,
+    Height,
+}
+
 fn height_from_cursor(
     origin: Vec3,
     dir: Vec3,
@@ -139,6 +146,18 @@ fn line_segments_for_rect(corners: [Vec3; 4]) -> Vec<(Vec3, Vec3)> {
     ]
 }
 
+fn box_frame_segments(plane: GridPlane, base_a: Vec3, base_b: Vec3, height: f32) -> Vec<(Vec3, Vec3)> {
+    let base_corners = rect_corners(plane, base_a, base_b);
+    let (_, _, n) = grid_axes(plane);
+    let top_corners = base_corners.map(|p| p + n * height);
+    let mut segments = line_segments_for_rect(base_corners);
+    segments.extend(line_segments_for_rect(top_corners));
+    for i in 0..4 {
+        segments.push((base_corners[i], top_corners[i]));
+    }
+    segments
+}
+
 fn circle_segments(plane: GridPlane, center: Vec3, radius: f32, steps: usize) -> Vec<(Vec3, Vec3)> {
     let (u, v, _) = grid_axes(plane);
     let steps = steps.max(8);
@@ -153,6 +172,35 @@ fn circle_segments(plane: GridPlane, center: Vec3, radius: f32, steps: usize) ->
         let a = points[i];
         let b = points[(i + 1) % steps];
         segments.push((a, b));
+    }
+    segments
+}
+
+fn cylinder_frame_segments(
+    plane: GridPlane,
+    center: Vec3,
+    radius: f32,
+    height: f32,
+    steps: usize,
+) -> Vec<(Vec3, Vec3)> {
+    let (u, v, n) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut base_points: Vec<Vec3> = Vec::with_capacity(steps);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        let base = center + u * (c * radius) + v * (s * radius);
+        base_points.push(base);
+        top_points.push(base + n * height);
+    }
+
+    let mut segments = Vec::with_capacity(steps * 3);
+    for i in 0..steps {
+        let next = (i + 1) % steps;
+        segments.push((base_points[i], base_points[next]));
+        segments.push((top_points[i], top_points[next]));
+        segments.push((base_points[i], top_points[i]));
     }
     segments
 }
@@ -180,6 +228,10 @@ pub struct SceneModel {
     box_base_end: Option<Vec3>,
     box_base_size: Option<Vec3>,
     box_height: Option<f32>,
+    cylinder_step: Option<CylinderCreateStep>,
+    cylinder_center: Option<Vec3>,
+    cylinder_radius: Option<f32>,
+    cylinder_height: Option<f32>,
 }
 
 impl Default for SceneModel {
@@ -206,6 +258,10 @@ impl Default for SceneModel {
             box_base_end: None,
             box_base_size: None,
             box_height: None,
+            cylinder_step: None,
+            cylinder_center: None,
+            cylinder_radius: None,
+            cylinder_height: None,
         }
     }
 }
@@ -341,13 +397,20 @@ impl SceneModel {
                 return result;
             }
             SceneInput::KeyEscape => {
-                if self.box_step.is_some() || self.sphere_center.is_some() {
+                if self.box_step.is_some()
+                    || self.sphere_center.is_some()
+                    || self.cylinder_step.is_some()
+                {
                     self.box_step = None;
                     self.box_base_start = None;
                     self.box_base_end = None;
                     self.box_base_size = None;
                     self.box_height = None;
                     self.sphere_center = None;
+                    self.cylinder_step = None;
+                    self.cylinder_center = None;
+                    self.cylinder_radius = None;
+                    self.cylinder_height = None;
                     self.preview_segments.clear();
                     self.preview_version = self.preview_version.wrapping_add(1);
                     result.request_redraw = true;
@@ -450,18 +513,15 @@ impl SceneModel {
                                 }
                                 BoxCreateStep::BaseSize => {
                                     if let Some(start) = self.box_base_start {
-                                        let (size, center) =
+                                        let (size, _) =
                                             base_size_and_center(config.grid_plane, start, hit_pos);
                                         self.box_base_size = Some(size);
                                         self.box_base_end = Some(hit_pos);
                                         self.box_height = Some(0.0);
                                         self.box_step = Some(BoxCreateStep::Height);
 
-                                        let corners = rect_corners(config.grid_plane, start, hit_pos);
-                                        let mut segments = line_segments_for_rect(corners);
-                                        let (_, _, n) = grid_axes(config.grid_plane);
-                                        let top = center + n * 0.0;
-                                        segments.push((center, top));
+                                        let segments =
+                                            box_frame_segments(config.grid_plane, start, hit_pos, 0.0);
                                         self.preview_segments = segments;
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
@@ -525,6 +585,114 @@ impl SceneModel {
                                         self.box_base_end = None;
                                         self.box_base_size = None;
                                         self.box_height = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if config.tool == SceneTool::Cylinder {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            match self
+                                .cylinder_step
+                                .unwrap_or(CylinderCreateStep::BaseCenter)
+                            {
+                                CylinderCreateStep::BaseCenter => {
+                                    self.cylinder_step = Some(CylinderCreateStep::BaseRadius);
+                                    self.cylinder_center = Some(hit_pos);
+                                    self.cylinder_radius = None;
+                                    self.cylinder_height = None;
+
+                                    let (u, v, _) = grid_axes(config.grid_plane);
+                                    let point_size = config.grid_step.max(0.05) * 0.3;
+                                    self.preview_segments = vec![
+                                        (hit_pos - u * point_size, hit_pos + u * point_size),
+                                        (hit_pos - v * point_size, hit_pos + v * point_size),
+                                    ];
+                                    self.preview_version =
+                                        self.preview_version.wrapping_add(1);
+                                    self.last_cursor = Some(pos);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                CylinderCreateStep::BaseRadius => {
+                                    if let Some(center) = self.cylinder_center {
+                                        let radius = (hit_pos - center).length().max(0.05);
+                                        self.cylinder_radius = Some(radius);
+                                        self.cylinder_height = Some(0.0);
+                                        self.cylinder_step = Some(CylinderCreateStep::Height);
+
+                                        let segments = cylinder_frame_segments(
+                                            config.grid_plane,
+                                            center,
+                                            radius,
+                                            0.0,
+                                            48,
+                                        );
+                                        self.preview_segments = segments;
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                                CylinderCreateStep::Height => {
+                                    if let (Some(center), Some(radius)) =
+                                        (self.cylinder_center, self.cylinder_radius)
+                                    {
+                                        let (_, _, n) = grid_axes(config.grid_plane);
+                                        let height = if let Some((origin, dir)) =
+                                            ray_from_cursor(pos, scene_bounds, &camera)
+                                        {
+                                            height_from_cursor(
+                                                origin,
+                                                dir,
+                                                center,
+                                                n,
+                                                camera.forward,
+                                            )
+                                        } else {
+                                            0.0
+                                        };
+
+                                        let h = height.max(0.05);
+                                        let size = Vec3::new(radius / 0.35, h, radius / 0.35);
+                                        let position = center + n * (h * 0.5);
+
+                                        let id = self.next_id;
+                                        self.next_id += 1;
+                                        self.entities.push(SceneEntity {
+                                            id,
+                                            kind: SolidKind::Cylinder,
+                                            position,
+                                            size,
+                                        });
+                                        self.entities_version =
+                                            self.entities_version.wrapping_add(1);
+                                        result.publish_entities = Some(
+                                            self.entities.iter().map(SceneEntityInfo::from).collect(),
+                                        );
+
+                                        self.selected = Some(id);
+                                        self.cylinder_step = None;
+                                        self.cylinder_center = None;
+                                        self.cylinder_radius = None;
+                                        self.cylinder_height = None;
                                         self.preview_segments.clear();
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
@@ -678,10 +846,8 @@ impl SceneModel {
                                                 n,
                                                 camera.forward,
                                             );
-                                            let top = base_center + n * height;
-                                            let corners = rect_corners(config.grid_plane, start, end);
-                                            let mut segments = line_segments_for_rect(corners);
-                                            segments.push((base_center, top));
+                                            let segments =
+                                                box_frame_segments(config.grid_plane, start, end, height);
                                             self.preview_segments = segments;
                                             self.preview_version =
                                                 self.preview_version.wrapping_add(1);
@@ -693,6 +859,68 @@ impl SceneModel {
                                         }
                                     }
                                     BoxCreateStep::BaseStart => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if config.tool == SceneTool::Cylinder {
+                    if let Some(step) = self.cylinder_step {
+                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(hit_pos) =
+                                intersect_plane(config.grid_plane, origin, dir)
+                            {
+                                match step {
+                                    CylinderCreateStep::BaseRadius => {
+                                        if let Some(center) = self.cylinder_center {
+                                            let radius = (hit_pos - center).length().max(0.05);
+                                            let segments = circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                radius,
+                                                48,
+                                            );
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    CylinderCreateStep::Height => {
+                                        if let (Some(center), Some(radius)) =
+                                            (self.cylinder_center, self.cylinder_radius)
+                                        {
+                                            let (_, _, n) = grid_axes(config.grid_plane);
+                                            let height = height_from_cursor(
+                                                origin,
+                                                dir,
+                                                center,
+                                                n,
+                                                camera.forward,
+                                            );
+                                            let segments = cylinder_frame_segments(
+                                                config.grid_plane,
+                                                center,
+                                                radius,
+                                                height,
+                                                48,
+                                            );
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    CylinderCreateStep::BaseCenter => {}
                                 }
                             }
                         }
