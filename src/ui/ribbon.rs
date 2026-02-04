@@ -39,9 +39,18 @@ pub enum RibbonAction {
 	Save,
 	Undo,
 	Redo,
+    Point,
 	Line,
 	Rect,
+    Polygon,
 	Circle,
+    Ellipse,
+    Arc,
+    Box,
+    Sphere,
+    Cone,
+    Torus,
+    Cylinder,
 	Extrude,
 	Revolve,
 	Fillet,
@@ -108,30 +117,67 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 			title: "Sketch",
 			buttons: vec![
 				RibbonButton {
-					icon: "／",
+					icon: "•",
+					label: "Point",
+					action: RibbonAction::Point,
+				},
+				RibbonButton {
+					icon: "/",
 					label: "Line",
 					action: RibbonAction::Line,
 				},
 				RibbonButton {
-					icon: "▭",
+					icon: "▢",
 					label: "Rect",
 					action: RibbonAction::Rect,
 				},
+            	RibbonButton {
+					icon: "⭔",
+					label: "Polygon",
+					action: RibbonAction::Polygon,
+				},
 				RibbonButton {
-					icon: "◯",
+					icon: "𖧋",
 					label: "Circle",
 					action: RibbonAction::Circle,
 				},
+            	RibbonButton {
+					icon: "⬭",
+					label: "Ellipse",
+					action: RibbonAction::Ellipse,
+				},
+                RibbonButton {
+					icon: "⌒",
+					label: "Arc",
+					action: RibbonAction::Arc,
+				},
+                RibbonButton {
+					icon: "➰",
+					label: "Arc",
+					action: RibbonAction::Arc,
+				},
+
+
 			],
 		}],
 		RibbonTab::Solid => vec![
 			RibbonGroup {
 				title: "Create",
 				buttons: vec![
+                    RibbonButton {
+                        icon: "🧊",
+                        label: "Box",
+                        action: RibbonAction::Box,
+                    },
 					RibbonButton {
-						icon: "⬆",
-						label: "Extrude",
-						action: RibbonAction::Extrude,
+						icon: "🔵",
+						label: "Sphere",
+						action: RibbonAction::Sphere,
+					},
+				    RibbonButton {
+						icon: "⭕",
+						label: "Torus",
+						action: RibbonAction::Torus,
 					},
 					RibbonButton {
 						icon: "⟳",
