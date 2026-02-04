@@ -19,12 +19,6 @@ pub(crate) struct PreviewKey {
     end: Vec3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct HighlightKey {
-    id: u64,
-    position: Vec3,
-    size: f32,
-}
 
 #[derive(Debug)]
 pub struct Pipeline {
@@ -50,7 +44,7 @@ pub struct Pipeline {
     pub(crate) highlight_pipeline: wgpu::RenderPipeline,
     pub(crate) highlight_vertices: wgpu::Buffer,
     pub(crate) highlight_vertex_count: u32,
-    pub(crate) highlight_key: Option<HighlightKey>,
+    pub(crate) selected_entities_version: u64,
     pub(crate) entities_version: u64,
     pub(crate) sketch_faces_version: u64,
     pub(crate) uniforms: wgpu::Buffer,
@@ -693,7 +687,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 mapped_at_creation: false,
             }),
             highlight_vertex_count: 0,
-            highlight_key: None,
+            selected_entities_version: 0,
             entities_version: 0,
             sketch_faces_version: 0,
             uniforms,
@@ -958,43 +952,42 @@ impl SceneView {
             }
         }
 
-        let highlight_key = self.selected.and_then(|id| {
-            self.entities
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| HighlightKey {
-                    id: e.id,
-                    position: e.position,
-                    size: e.size.x.max(e.size.y).max(e.size.z),
-                })
-        });
+        if pipeline.selected_entities_version != self.selected_entities_version
+            || pipeline.entities_version != self.entities_version
+        {
+            pipeline.selected_entities_version = self.selected_entities_version;
 
-        if pipeline.highlight_key != highlight_key {
-            pipeline.highlight_key = highlight_key;
-            if let Some(key) = highlight_key {
-                let s = (key.size * 0.6).max(0.05);
-                let p = key.position;
-                let vertices = [
-                    GridVertex {
+            let mut vertices: Vec<GridVertex> = Vec::new();
+            let selected = self.selected_entities.as_ref();
+            for id in selected {
+                if let Some(e) = self.entities.iter().find(|ent| ent.id == *id) {
+                    let size = e.size.x.max(e.size.y).max(e.size.z);
+                    let s = (size * 0.6).max(0.05);
+                    let p = e.position;
+                    vertices.push(GridVertex {
                         position: [p[0] - s, p[1], p[2]],
-                    },
-                    GridVertex {
+                    });
+                    vertices.push(GridVertex {
                         position: [p[0] + s, p[1], p[2]],
-                    },
-                    GridVertex {
+                    });
+                    vertices.push(GridVertex {
                         position: [p[0], p[1] - s, p[2]],
-                    },
-                    GridVertex {
+                    });
+                    vertices.push(GridVertex {
                         position: [p[0], p[1] + s, p[2]],
-                    },
-                    GridVertex {
+                    });
+                    vertices.push(GridVertex {
                         position: [p[0], p[1], p[2] - s],
-                    },
-                    GridVertex {
+                    });
+                    vertices.push(GridVertex {
                         position: [p[0], p[1], p[2] + s],
-                    },
-                ];
+                    });
+                }
+            }
 
+            if vertices.is_empty() {
+                pipeline.highlight_vertex_count = 0;
+            } else {
                 pipeline.highlight_vertices =
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("scene_highlight_vertices"),
@@ -1002,8 +995,6 @@ impl SceneView {
                         usage: wgpu::BufferUsages::VERTEX,
                     });
                 pipeline.highlight_vertex_count = vertices.len() as u32;
-            } else {
-                pipeline.highlight_vertex_count = 0;
             }
         }
 

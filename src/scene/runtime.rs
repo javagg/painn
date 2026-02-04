@@ -537,6 +537,8 @@ pub struct SceneModel {
     entities: Vec<SceneEntity>,
     entities_version: u64,
     selected: Option<u64>,
+    selected_entities: Vec<u64>,
+    selected_entities_version: u64,
     selected_face: Option<usize>,
     next_id: u64,
     drag_start: Option<Vec3>,
@@ -588,6 +590,8 @@ impl Default for SceneModel {
             entities: Vec::new(),
             entities_version: 0,
             selected: None,
+            selected_entities: Vec::new(),
+            selected_entities_version: 0,
             selected_face: None,
             next_id: 1,
             drag_start: None,
@@ -693,7 +697,8 @@ pub struct SceneView {
     pub sketch_faces_version: u64,
     pub face_highlight_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
     pub face_highlight_version: u64,
-    pub selected: Option<u64>,
+    pub selected_entities: std::sync::Arc<Vec<u64>>,
+    pub selected_entities_version: u64,
     pub axes_enabled: bool,
     pub axes_size: f32,
     pub axes_margin: f32,
@@ -732,7 +737,8 @@ impl SceneModel {
             sketch_faces_version: self.sketch_faces_version,
             face_highlight_segments: std::sync::Arc::new(self.face_highlight_segments.clone()),
             face_highlight_version: self.face_highlight_version,
-            selected: self.selected,
+            selected_entities: std::sync::Arc::new(self.selected_entities.clone()),
+            selected_entities_version: self.selected_entities_version,
             axes_enabled: config.axes_enabled,
             axes_size: config.axes_size,
             axes_margin: config.axes_margin,
@@ -753,6 +759,10 @@ impl SceneModel {
         if let Some(id) = requests.select_id {
             if self.entities.iter().any(|e| e.id == id) && self.selected != Some(id) {
                 self.selected = Some(id);
+                self.selected_entities.clear();
+                self.selected_entities.push(id);
+                self.selected_entities_version =
+                    self.selected_entities_version.wrapping_add(1);
                 changed = true;
             }
         }
@@ -824,6 +834,27 @@ impl SceneModel {
                 return result;
             }
             SceneInput::KeyDelete => {
+                if !self.selected_entities.is_empty() {
+                    let before = self.entities.len();
+                    let selected = self.selected_entities.clone();
+                    self.entities
+                        .retain(|e| !selected.iter().any(|id| *id == e.id));
+                    if self.entities.len() != before {
+                        self.entities_version = self.entities_version.wrapping_add(1);
+                        result.publish_entities = Some(
+                            self.entities.iter().map(SceneEntityInfo::from).collect(),
+                        );
+                        result.capture = true;
+                    }
+                    self.selected = None;
+                    self.selected_entities.clear();
+                    self.selected_entities_version =
+                        self.selected_entities_version.wrapping_add(1);
+                    result.request_redraw = true;
+                    result.handled = true;
+                    return result;
+                }
+
                 if let Some(selected) = self.selected {
                     let before = self.entities.len();
                     self.entities.retain(|e| e.id != selected);
@@ -835,6 +866,9 @@ impl SceneModel {
                         result.capture = true;
                     }
                     self.selected = None;
+                    self.selected_entities.clear();
+                    self.selected_entities_version =
+                        self.selected_entities_version.wrapping_add(1);
                     result.request_redraw = true;
                     result.handled = true;
                     return result;
@@ -1639,15 +1673,52 @@ impl SceneModel {
 
                 let hit = pick_entity(pos, scene_bounds, &camera, &self.entities);
                 if let Some(id) = hit {
-                    self.selected = Some(id);
-                    self.selected_face = None;
-                    self.face_highlight_segments.clear();
-                    self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
-                    self.dragging = Dragging::MoveEntity;
+                    if config.tool == SceneTool::Select {
+                        if self.modifiers.shift {
+                            if let Some(pos) =
+                                self.selected_entities.iter().position(|v| *v == id)
+                            {
+                                self.selected_entities.remove(pos);
+                            } else {
+                                self.selected_entities.push(id);
+                            }
+                        } else {
+                            self.selected_entities.clear();
+                            self.selected_entities.push(id);
+                        }
+
+                        self.selected = self.selected_entities.last().copied();
+                        self.selected_entities_version =
+                            self.selected_entities_version.wrapping_add(1);
+                        self.selected_face = None;
+                        self.face_highlight_segments.clear();
+                        self.face_highlight_version =
+                            self.face_highlight_version.wrapping_add(1);
+
+                        if !self.modifiers.shift && self.selected_entities.len() == 1 {
+                            self.dragging = Dragging::MoveEntity;
+                        } else {
+                            self.dragging = Dragging::None;
+                        }
+                    } else {
+                        self.selected = Some(id);
+                        self.selected_entities.clear();
+                        self.selected_entities.push(id);
+                        self.selected_entities_version =
+                            self.selected_entities_version.wrapping_add(1);
+                        self.selected_face = None;
+                        self.face_highlight_segments.clear();
+                        self.face_highlight_version =
+                            self.face_highlight_version.wrapping_add(1);
+                        self.dragging = Dragging::MoveEntity;
+                    }
                 } else if config.tool == SceneTool::Select {
                     let face_hit = pick_face(pos, scene_bounds, &camera, &self.sketch_faces);
                     if let Some(index) = face_hit {
                         self.selected = None;
+                        self.selected_entities.clear();
+                        self.selected_entities_version =
+                            self.selected_entities_version.wrapping_add(1);
                         self.selected_face = Some(index);
                         if let Some(face) = self.sketch_faces.get(index) {
                             self.face_highlight_segments = outline_segments(&face.points);
@@ -1660,6 +1731,9 @@ impl SceneModel {
                         }
                     } else {
                         self.selected = None;
+                        self.selected_entities.clear();
+                        self.selected_entities_version =
+                            self.selected_entities_version.wrapping_add(1);
                         self.selected_face = None;
                         self.face_highlight_segments.clear();
                         self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
@@ -1681,6 +1755,10 @@ impl SceneModel {
                                 self.entities.iter().map(SceneEntityInfo::from).collect(),
                             );
                             self.selected = Some(id);
+                            self.selected_entities.clear();
+                            self.selected_entities.push(id);
+                            self.selected_entities_version =
+                                self.selected_entities_version.wrapping_add(1);
                             self.selected_face = None;
                             self.face_highlight_segments.clear();
                             self.face_highlight_version =
