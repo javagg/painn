@@ -3,7 +3,7 @@ use iced::{Alignment, Element, Length, Padding};
 use iced_aw::{TabBar, TabLabel};
 
 const RIBBON_HEIGHT: f32 = 150.0;
-const RIBBON_CONTENT_HEIGHT: f32 = 76.0;
+const RIBBON_CONTENT_HEIGHT: f32 = 80.0;
 const COMPACT_GAP: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,6 +41,7 @@ pub enum RibbonAction {
 	Redo,
     Point,
 	Line,
+	Bezier,
 	Rect,
     Polygon,
 	Circle,
@@ -52,6 +53,10 @@ pub enum RibbonAction {
     Torus,
     Cylinder,
 	Extrude,
+	Rotate,
+	Mirror,
+	Translate,
+	Scale,
 	Revolve,
 	Fillet,
 	Chamfer,
@@ -152,12 +157,10 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 					action: RibbonAction::Arc,
 				},
                 RibbonButton {
-					icon: "➰",
-					label: "Arc",
-					action: RibbonAction::Arc,
+					icon: "〰️",
+					label: "Bezier",
+					action: RibbonAction::Bezier,
 				},
-
-
 			],
 		}],
 		RibbonTab::Solid => vec![
@@ -170,15 +173,27 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
                         action: RibbonAction::Box,
                     },
 					RibbonButton {
-						icon: "🔵",
+						icon: "🏀",
 						label: "Sphere",
 						action: RibbonAction::Sphere,
 					},
+					RibbonButton {
+						icon: "🛢",
+						label: "Cylinder",
+						action: RibbonAction::Cylinder,
+					},
 				    RibbonButton {
-						icon: "⭕",
+						icon: "🍩",
 						label: "Torus",
 						action: RibbonAction::Torus,
 					},
+				    RibbonButton {
+						icon: "🥛",
+						label: "Cone",
+						action: RibbonAction::Cone,
+					},
+
+					
 					RibbonButton {
 						icon: "⟳",
 						label: "Revolve",
@@ -251,7 +266,7 @@ pub fn ribbon<'a, Message: Clone + 'static>(
 	let groups = default_groups(active_tab)
 		.into_iter()
 		.map(|group| {
-			let compact = matches!(active_tab, RibbonTab::Sketch);
+			let compact = false;
 			ribbon_group(group, compact, &on_action)
 		})
 		.collect::<Vec<_>>();
