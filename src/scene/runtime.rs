@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::scene::{
     camera_from_params, intersect_plane, pick_entity, ray_from_cursor, preset_angles, CameraMode,
     CameraPreset, GridPlane, SceneEntity, SceneEntityInfo, ScenePoint, SceneRect, SceneTool,
-    SketchFace, SolidKind,
+    SketchFace, SolidKind, pick_face,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -254,6 +254,19 @@ fn polyline_preview_segments(points: &[Vec3], current: Option<Vec3>) -> Vec<(Vec
         if last != cur {
             segments.push((last, cur));
         }
+    }
+    segments
+}
+
+fn outline_segments(points: &[Vec3]) -> Vec<(Vec3, Vec3)> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut segments = Vec::with_capacity(points.len());
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        segments.push((a, b));
     }
     segments
 }
@@ -524,6 +537,7 @@ pub struct SceneModel {
     entities: Vec<SceneEntity>,
     entities_version: u64,
     selected: Option<u64>,
+    selected_face: Option<usize>,
     next_id: u64,
     drag_start: Option<Vec3>,
     drag_offset: Vec3,
@@ -535,6 +549,8 @@ pub struct SceneModel {
     sketch_version: u64,
     sketch_faces: Vec<SketchFace>,
     sketch_faces_version: u64,
+    face_highlight_segments: Vec<(Vec3, Vec3)>,
+    face_highlight_version: u64,
     sketch_active: bool,
     sketch_start: Option<Vec3>,
     sketch_current: Option<Vec3>,
@@ -572,6 +588,7 @@ impl Default for SceneModel {
             entities: Vec::new(),
             entities_version: 0,
             selected: None,
+            selected_face: None,
             next_id: 1,
             drag_start: None,
             drag_offset: Vec3::ZERO,
@@ -583,6 +600,8 @@ impl Default for SceneModel {
             sketch_version: 0,
             sketch_faces: Vec::new(),
             sketch_faces_version: 0,
+            face_highlight_segments: Vec::new(),
+            face_highlight_version: 0,
             sketch_active: false,
             sketch_start: None,
             sketch_current: None,
@@ -672,6 +691,8 @@ pub struct SceneView {
     pub sketch_version: u64,
     pub sketch_faces: std::sync::Arc<Vec<SketchFace>>,
     pub sketch_faces_version: u64,
+    pub face_highlight_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
+    pub face_highlight_version: u64,
     pub selected: Option<u64>,
     pub axes_enabled: bool,
     pub axes_size: f32,
@@ -709,6 +730,8 @@ impl SceneModel {
             sketch_version: self.sketch_version,
             sketch_faces: std::sync::Arc::new(self.sketch_faces.clone()),
             sketch_faces_version: self.sketch_faces_version,
+            face_highlight_segments: std::sync::Arc::new(self.face_highlight_segments.clone()),
+            face_highlight_version: self.face_highlight_version,
             selected: self.selected,
             axes_enabled: config.axes_enabled,
             axes_size: config.axes_size,
@@ -998,6 +1021,17 @@ impl SceneModel {
                                                     });
                                                     self.sketch_faces_version =
                                                         self.sketch_faces_version.wrapping_add(1);
+                                                    if let Some(index) = self.selected_face {
+                                                        if let Some(face) =
+                                                            self.sketch_faces.get(index)
+                                                        {
+                                                            self.face_highlight_segments =
+                                                                outline_segments(&face.points);
+                                                            self.face_highlight_version = self
+                                                                .face_highlight_version
+                                                                .wrapping_add(1);
+                                                        }
+                                                    }
                                                 }
                                             }
 
@@ -1606,7 +1640,30 @@ impl SceneModel {
                 let hit = pick_entity(pos, scene_bounds, &camera, &self.entities);
                 if let Some(id) = hit {
                     self.selected = Some(id);
+                    self.selected_face = None;
+                    self.face_highlight_segments.clear();
+                    self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
                     self.dragging = Dragging::MoveEntity;
+                } else if config.tool == SceneTool::Select {
+                    let face_hit = pick_face(pos, scene_bounds, &camera, &self.sketch_faces);
+                    if let Some(index) = face_hit {
+                        self.selected = None;
+                        self.selected_face = Some(index);
+                        if let Some(face) = self.sketch_faces.get(index) {
+                            self.face_highlight_segments = outline_segments(&face.points);
+                            self.face_highlight_version =
+                                self.face_highlight_version.wrapping_add(1);
+                        } else {
+                            self.face_highlight_segments.clear();
+                            self.face_highlight_version =
+                                self.face_highlight_version.wrapping_add(1);
+                        }
+                    } else {
+                        self.selected = None;
+                        self.selected_face = None;
+                        self.face_highlight_segments.clear();
+                        self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
+                    }
                 } else if let Some(create_kind) = config.tool.create_kind() {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
@@ -1624,6 +1681,10 @@ impl SceneModel {
                                 self.entities.iter().map(SceneEntityInfo::from).collect(),
                             );
                             self.selected = Some(id);
+                            self.selected_face = None;
+                            self.face_highlight_segments.clear();
+                            self.face_highlight_version =
+                                self.face_highlight_version.wrapping_add(1);
                             self.dragging = Dragging::CreateEntity;
                             self.drag_start = Some(hit_pos);
                         }

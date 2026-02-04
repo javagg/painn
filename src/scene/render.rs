@@ -46,6 +46,7 @@ pub struct Pipeline {
     pub(crate) preview_key: Option<PreviewKey>,
     pub(crate) preview_version: u64,
     pub(crate) sketch_version: u64,
+    pub(crate) face_highlight_version: u64,
     pub(crate) highlight_pipeline: wgpu::RenderPipeline,
     pub(crate) highlight_vertices: wgpu::Buffer,
     pub(crate) highlight_vertex_count: u32,
@@ -683,6 +684,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             preview_key: None,
             preview_version: 0,
             sketch_version: 0,
+            face_highlight_version: 0,
             highlight_pipeline,
             highlight_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_highlight_vertices"),
@@ -914,20 +916,29 @@ impl SceneView {
             }
         }
 
-        if pipeline.preview_version != self.preview_version || pipeline.sketch_version != self.sketch_version {
+        if pipeline.preview_version != self.preview_version
+            || pipeline.sketch_version != self.sketch_version
+            || pipeline.face_highlight_version != self.face_highlight_version
+        {
             pipeline.preview_version = self.preview_version;
             pipeline.sketch_version = self.sketch_version;
+            pipeline.face_highlight_version = self.face_highlight_version;
 
             let preview_segments = self.preview_segments.as_ref();
             let sketch_segments = self.sketch_segments.as_ref();
-            let total = preview_segments.len() + sketch_segments.len();
+            let highlight_segments = self.face_highlight_segments.as_ref();
+            let total = preview_segments.len() + sketch_segments.len() + highlight_segments.len();
 
             if total == 0 {
                 pipeline.preview_key = None;
                 pipeline.preview_vertex_count = 0;
             } else {
                 let mut vertices: Vec<GridVertex> = Vec::with_capacity(total * 2);
-                for (a, b) in sketch_segments.iter().chain(preview_segments.iter()) {
+                for (a, b) in highlight_segments
+                    .iter()
+                    .chain(sketch_segments.iter())
+                    .chain(preview_segments.iter())
+                {
                     vertices.push(GridVertex {
                         position: a.to_array(),
                     });

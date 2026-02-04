@@ -81,6 +81,59 @@ pub struct SketchFace {
     pub points: Vec<Vec3>,
 }
 
+pub(crate) fn pick_face(
+    cursor: ScenePoint,
+    bounds: SceneRect,
+    camera: &Camera,
+    faces: &[SketchFace],
+) -> Option<usize> {
+    let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
+    let proj = match camera.mode {
+        CameraMode::Perspective => {
+            Mat4::perspective_rh(camera.fovy, camera.aspect, camera.near, camera.far)
+        }
+        CameraMode::Orthographic => {
+            let half_h = camera.ortho_half_h;
+            let half_w = half_h * camera.aspect;
+            Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, camera.near, camera.far)
+        }
+    };
+    let mvp = proj * view;
+
+    let mut best: Option<(usize, f32)> = None;
+    let tolerance = 12.0_f32;
+
+    for (idx, face) in faces.iter().enumerate() {
+        if face.points.len() < 3 {
+            continue;
+        }
+        let mut center = Vec3::ZERO;
+        for p in &face.points {
+            center += *p;
+        }
+        center /= face.points.len() as f32;
+
+        let Some(screen) = project_point(mvp, bounds, center) else {
+            continue;
+        };
+
+        let dx = screen.x - cursor.x;
+        let dy = screen.y - cursor.y;
+        let dist2 = dx * dx + dy * dy;
+        if dist2 <= tolerance * tolerance {
+            if let Some((_, best_dist)) = best {
+                if dist2 < best_dist {
+                    best = Some((idx, dist2));
+                }
+            } else {
+                best = Some((idx, dist2));
+            }
+        }
+    }
+
+    best.map(|(idx, _)| idx)
+}
+
 impl SceneRect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self { x, y, width, height }
