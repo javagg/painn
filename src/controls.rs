@@ -688,6 +688,7 @@ struct Scene<Message> {
     axes_margin: f32,
     background: [f32; 4],
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
+    on_tool_finished: Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
 }
@@ -743,7 +744,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                 config,
                 requests,
             );
-            return scene_action(result, &self.on_entities_snapshot);
+            return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
         }
 
         if let Event::Keyboard(iced_keyboard::Event::KeyPressed { key, .. }) = event {
@@ -758,7 +759,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                return scene_action(result, &self.on_entities_snapshot);
+                return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
             }
 
             if matches!(key, iced_keyboard::Key::Named(iced_keyboard::key::Named::Escape)) {
@@ -768,7 +769,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                return scene_action(result, &self.on_entities_snapshot);
+                return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
             }
         }
 
@@ -811,7 +812,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
 
         if let Some(input) = input {
             let result = state.model.update(input, scene_bounds, config, requests);
-            return scene_action(result, &self.on_entities_snapshot);
+            return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
         }
 
         None
@@ -855,8 +856,13 @@ impl<Message> shader::Program<Message> for Scene<Message> {
 fn scene_action<Message>(
     result: SceneUpdateResult,
     on_entities_snapshot: &Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
+    on_tool_finished: &Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
 ) -> Option<shader::Action<Message>> {
-    if !result.handled && result.publish_entities.is_none() && !result.request_redraw {
+    if !result.handled
+        && result.publish_entities.is_none()
+        && result.finished_tool.is_none()
+        && !result.request_redraw
+    {
         return None;
     }
 
@@ -865,6 +871,14 @@ fn scene_action<Message>(
             shader::Action::publish(cb(list))
         } else {
             shader::Action::request_redraw()
+        }
+    } else if let Some(tool) = result.finished_tool {
+        if let Some(cb) = on_tool_finished {
+            shader::Action::publish(cb(tool))
+        } else if result.request_redraw {
+            shader::Action::request_redraw()
+        } else {
+            return None;
         }
     } else if result.request_redraw {
         shader::Action::request_redraw()
@@ -894,6 +908,7 @@ pub fn scene_widget<'a, Message>(
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
+    on_tool_finished: impl Fn(SceneTool) -> Message + 'static,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -911,6 +926,7 @@ where
         axes_margin,
         background: color_to_rgba(background),
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
+        on_tool_finished: Some(std::rc::Rc::new(on_tool_finished)),
         request_select_id,
         request_focus_id,
     })

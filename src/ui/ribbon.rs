@@ -33,6 +33,7 @@ impl RibbonTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RibbonAction {
 	New,
 	Open,
@@ -42,6 +43,7 @@ pub enum RibbonAction {
     Point,
 	Line,
 	Bezier,
+	Spline,
 	Rect,
     Polygon,
 	Circle,
@@ -161,6 +163,11 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 					label: "Bezier",
 					action: RibbonAction::Bezier,
 				},
+                RibbonButton {
+					icon: "〰️",
+					label: "Spline",
+					action: RibbonAction::Spline,
+				},
 			],
 		}],
 		RibbonTab::Solid => vec![
@@ -254,6 +261,7 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 
 pub fn ribbon<'a, Message: Clone + 'static>(
 	active_tab: RibbonTab,
+	active_action: Option<RibbonAction>,
 	on_tab_select: fn(RibbonTab) -> Message,
 	on_action: fn(RibbonAction) -> Message,
 ) -> Element<'a, Message> {
@@ -267,7 +275,7 @@ pub fn ribbon<'a, Message: Clone + 'static>(
 		.into_iter()
 		.map(|group| {
 			let compact = false;
-			ribbon_group(group, compact, &on_action)
+			ribbon_group(group, compact, active_action, &on_action)
 		})
 		.collect::<Vec<_>>();
 
@@ -289,6 +297,7 @@ pub fn ribbon<'a, Message: Clone + 'static>(
 fn ribbon_group<'a, Message: Clone + 'static>(
 	group: RibbonGroup,
 	compact: bool,
+	active_action: Option<RibbonAction>,
 	on_action: &impl Fn(RibbonAction) -> Message,
 ) -> Element<'a, Message> {
 	let content = if compact {
@@ -298,7 +307,10 @@ fn ribbon_group<'a, Message: Clone + 'static>(
 		let buttons = group
 			.buttons
 			.into_iter()
-			.map(|b| ribbon_icon_button(b, button_height, on_action))
+			.map(|b| {
+				let is_active = active_action == Some(b.action);
+				ribbon_icon_button(b, button_height, is_active, on_action)
+			})
 			.collect::<Vec<_>>();
 		column![
 			column(buttons).spacing(COMPACT_GAP).align_x(Alignment::Center),
@@ -310,7 +322,10 @@ fn ribbon_group<'a, Message: Clone + 'static>(
 		let buttons = group
 			.buttons
 			.into_iter()
-			.map(|b| ribbon_button(b, on_action))
+			.map(|b| {
+				let is_active = active_action == Some(b.action);
+				ribbon_button(b, is_active, on_action)
+			})
 			.collect::<Vec<_>>();
 		column![
 			row(buttons)
@@ -330,11 +345,22 @@ fn ribbon_group<'a, Message: Clone + 'static>(
 
 fn ribbon_button<'a, Message: Clone + 'static>(
 	button_def: RibbonButton,
+	is_active: bool,
 	on_action: &impl Fn(RibbonAction) -> Message,
 ) -> Element<'a, Message> {
+	let icon_text = if is_active {
+		format!("[{}]", button_def.icon)
+	} else {
+		button_def.icon.to_string()
+	};
+	let label_text = if is_active {
+		format!("{} ✓", button_def.label)
+	} else {
+		button_def.label.to_string()
+	};
 	let content = column![
-		text(button_def.icon).size(20),
-		text(button_def.label).size(12),
+		text(icon_text).size(20),
+		text(label_text).size(12),
 	]
 	.spacing(4)
 	.align_x(Alignment::Center);
@@ -349,9 +375,15 @@ fn ribbon_button<'a, Message: Clone + 'static>(
 fn ribbon_icon_button<'a, Message: Clone + 'static>(
 	button_def: RibbonButton,
 	button_height: f32,
+	is_active: bool,
 	on_action: &impl Fn(RibbonAction) -> Message,
 ) -> Element<'a, Message> {
-	let content = column![text(button_def.icon).size(20)]
+	let icon_text = if is_active {
+		format!("[{}]", button_def.icon)
+	} else {
+		button_def.icon.to_string()
+	};
+	let content = column![text(icon_text).size(20)]
 		.align_x(Alignment::Center);
 
 	button(content)

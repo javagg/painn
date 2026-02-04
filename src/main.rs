@@ -113,6 +113,7 @@ enum Message {
     SceneSidebarTabSelected(SceneSidebarTab),
     SceneZoomIn,
     SceneZoomOut,
+    SceneToolCompleted(SceneTool),
     LoadGmsh,
     GmshLoaded(Result<Option<GmshLoadResult>, String>),
     Canvas(CanvasEvent),
@@ -209,6 +210,7 @@ struct App {
     draft: Draft,
     show_menubar: bool,
     scene_entities: Vec<SceneEntityInfo>,
+    ribbon_active_action: Option<RibbonAction>,
     scene_request_select_id: Option<u64>,
     scene_request_focus_id: Option<u64>,
     scene_zoom_factor: f32,
@@ -259,6 +261,7 @@ impl App {
             gmsh_mesh_version: 0,
             gmsh_status: None,
             ribbon_tab: RibbonTab::Home,
+            ribbon_active_action: None,
         }
     }
 
@@ -448,6 +451,13 @@ impl App {
                 self.scene_zoom_version = self.scene_zoom_version.wrapping_add(1);
                 self.invalidate();
             }
+            Message::SceneToolCompleted(tool) => {
+                if tool.is_sketch() {
+                    self.scene_tool = SceneTool::Select;
+                    self.ribbon_active_action = None;
+                    self.invalidate();
+                }
+            }
             Message::LoadGmsh => {
                 return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
             }
@@ -470,8 +480,69 @@ impl App {
                 self.ribbon_tab = tab;
                 self.invalidate();
             }
-            Message::RibbonAction(_action) => {
-                // TODO: map ribbon actions to app commands
+            Message::RibbonAction(action) => {
+                match action {
+                    RibbonAction::Point => {
+                        self.scene_tool = SceneTool::SketchPoint;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Line => {
+                        self.scene_tool = SceneTool::SketchLine;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Rect => {
+                        self.scene_tool = SceneTool::SketchRect;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Polygon => {
+                        self.scene_tool = SceneTool::SketchPolygon;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Circle => {
+                        self.scene_tool = SceneTool::SketchCircle;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Ellipse => {
+                        self.scene_tool = SceneTool::SketchEllipse;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Arc => {
+                        self.scene_tool = SceneTool::SketchArc;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Bezier => {
+                        self.scene_tool = SceneTool::SketchBezier;
+                        self.ribbon_active_action = Some(action);
+                    }
+                    RibbonAction::Box => {
+                        self.scene_tool = SceneTool::Box;
+                        self.ribbon_active_action = None;
+                    }
+                    RibbonAction::Sphere => {
+                        self.scene_tool = SceneTool::Sphere;
+                        self.ribbon_active_action = None;
+                    }
+                    RibbonAction::Cylinder => {
+                        self.scene_tool = SceneTool::Cylinder;
+                        self.ribbon_active_action = None;
+                    }
+                    RibbonAction::Cone => {
+                        self.scene_tool = SceneTool::Cone;
+                        self.ribbon_active_action = None;
+                    }
+                    RibbonAction::Torus => {
+                        self.scene_tool = SceneTool::Torus;
+                        self.ribbon_active_action = None;
+                    }
+                    RibbonAction::TopView => {
+                        self.scene_camera_preset = Some(CameraPreset::Top);
+                    }
+                    RibbonAction::IsoView => {
+                        self.scene_camera_preset = Some(CameraPreset::Iso);
+                    }
+                    _ => {}
+                }
+                self.invalidate();
             }
             Message::Quit => {
                 // TODO: request app quit (platform dependent)
@@ -888,6 +959,7 @@ impl App {
             self.scene_request_select_id,
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),
+            Message::SceneToolCompleted,
         );
 
         let sidebar = controls::build_scene_sidebar(&self.scene_entities);
@@ -905,6 +977,7 @@ impl App {
         let scene_ribbon = match self.active_tab {
             Tab::Scene => Some(ribbon(
                 self.ribbon_tab,
+                self.ribbon_active_action,
                 Message::RibbonTabChanged,
                 Message::RibbonAction,
             )),

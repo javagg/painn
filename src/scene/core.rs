@@ -1,6 +1,7 @@
 use glam::{Mat4, Vec3, Vec4};
 use crate::cad;
-use truck_polymesh::PolygonMesh;
+use truck_modeling::Point3;
+use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -73,6 +74,11 @@ pub struct SceneRect {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SketchFace {
+    pub points: Vec<Vec3>,
 }
 
 impl SceneRect {
@@ -350,6 +356,69 @@ pub(crate) fn build_scene_mesh(entities: &[SceneEntity]) -> Option<PolygonMesh> 
         mesh.merge(other);
     }
     Some(mesh)
+}
+
+pub(crate) fn build_faces_mesh(faces: &[SketchFace]) -> Option<PolygonMesh> {
+    let mut positions: Vec<Point3> = Vec::new();
+    let mut tri_faces: Vec<[StandardVertex; 3]> = Vec::new();
+
+    for face in faces {
+        if face.points.len() < 3 {
+            continue;
+        }
+
+        let base = positions.len();
+        for p in &face.points {
+            positions.push(Point3::new(p.x as f64, p.y as f64, p.z as f64));
+        }
+
+        for i in 1..(face.points.len() - 1) {
+            tri_faces.push([
+                StandardVertex {
+                    pos: base,
+                    uv: None,
+                    nor: None,
+                },
+                StandardVertex {
+                    pos: base + i,
+                    uv: None,
+                    nor: None,
+                },
+                StandardVertex {
+                    pos: base + i + 1,
+                    uv: None,
+                    nor: None,
+                },
+            ]);
+        }
+    }
+
+    if tri_faces.is_empty() {
+        return None;
+    }
+
+    let attributes = StandardAttributes {
+        positions,
+        uv_coords: Vec::new(),
+        normals: Vec::new(),
+    };
+    let faces = Faces::from_tri_and_quad_faces(tri_faces, Vec::new());
+    Some(PolygonMesh::new(attributes, faces))
+}
+
+pub(crate) fn build_scene_mesh_with_faces(
+    entities: &[SceneEntity],
+    faces: &[SketchFace],
+) -> Option<PolygonMesh> {
+    let mut mesh = build_scene_mesh(entities);
+    if let Some(face_mesh) = build_faces_mesh(faces) {
+        if let Some(ref mut base) = mesh {
+            base.merge(face_mesh);
+        } else {
+            mesh = Some(face_mesh);
+        }
+    }
+    mesh
 }
 
 pub(crate) fn mesh_to_vertex_index(mesh: &PolygonMesh) -> (Vec<Vertex>, Vec<u32>) {
@@ -652,6 +721,14 @@ pub enum SceneTool {
     Cylinder,
     Cone,
     Torus,
+    SketchPoint,
+    SketchLine,
+    SketchRect,
+    SketchPolygon,
+    SketchCircle,
+    SketchEllipse,
+    SketchArc,
+    SketchBezier,
 }
 
 impl SceneTool {
@@ -672,6 +749,14 @@ impl SceneTool {
             SceneTool::Cylinder => "Cylinder",
             SceneTool::Cone => "Cone",
             SceneTool::Torus => "Torus",
+            SceneTool::SketchPoint => "Point",
+            SceneTool::SketchLine => "Line",
+            SceneTool::SketchRect => "Rectangle",
+            SceneTool::SketchPolygon => "Polygon",
+            SceneTool::SketchCircle => "Circle",
+            SceneTool::SketchEllipse => "Ellipse",
+            SceneTool::SketchArc => "Arc",
+            SceneTool::SketchBezier => "Bezier",
         }
     }
 
@@ -683,7 +768,29 @@ impl SceneTool {
             SceneTool::Cylinder => Some(SolidKind::Cylinder),
             SceneTool::Cone => Some(SolidKind::Cone),
             SceneTool::Torus => Some(SolidKind::Torus),
+            SceneTool::SketchPoint
+            | SceneTool::SketchLine
+            | SceneTool::SketchRect
+            | SceneTool::SketchPolygon
+            | SceneTool::SketchCircle
+            | SceneTool::SketchEllipse
+            | SceneTool::SketchArc
+            | SceneTool::SketchBezier => None,
         }
+    }
+
+    pub fn is_sketch(self) -> bool {
+        matches!(
+            self,
+            SceneTool::SketchPoint
+                | SceneTool::SketchLine
+                | SceneTool::SketchRect
+                | SceneTool::SketchPolygon
+                | SceneTool::SketchCircle
+                | SceneTool::SketchEllipse
+                | SceneTool::SketchArc
+                | SceneTool::SketchBezier
+        )
     }
 }
 

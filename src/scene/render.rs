@@ -2,7 +2,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::scene::{
-    AxesVertex, GridPlane, GridVertex, SceneRect, SceneView, Uniforms, Vertex, build_grid_vertices, build_scene_mesh, camera_from_params, mesh_to_vertex_index
+    AxesVertex, GridPlane, GridVertex, SceneRect, SceneView, Uniforms, Vertex, build_grid_vertices, build_scene_mesh_with_faces, camera_from_params, mesh_to_vertex_index
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,11 +45,13 @@ pub struct Pipeline {
     pub(crate) preview_vertex_count: u32,
     pub(crate) preview_key: Option<PreviewKey>,
     pub(crate) preview_version: u64,
+    pub(crate) sketch_version: u64,
     pub(crate) highlight_pipeline: wgpu::RenderPipeline,
     pub(crate) highlight_vertices: wgpu::Buffer,
     pub(crate) highlight_vertex_count: u32,
     pub(crate) highlight_key: Option<HighlightKey>,
     pub(crate) entities_version: u64,
+    pub(crate) sketch_faces_version: u64,
     pub(crate) uniforms: wgpu::Buffer,
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) depth: wgpu::TextureView,
@@ -680,6 +682,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             preview_vertex_count: 0,
             preview_key: None,
             preview_version: 0,
+            sketch_version: 0,
             highlight_pipeline,
             highlight_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_highlight_vertices"),
@@ -690,6 +693,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             highlight_vertex_count: 0,
             highlight_key: None,
             entities_version: 0,
+            sketch_faces_version: 0,
             uniforms,
             bind_group,
             depth,
@@ -880,10 +884,16 @@ impl SceneView {
             }
         }
 
-        if pipeline.entities_version != self.entities_version {
+        if pipeline.entities_version != self.entities_version
+            || pipeline.sketch_faces_version != self.sketch_faces_version
+        {
             pipeline.entities_version = self.entities_version;
+            pipeline.sketch_faces_version = self.sketch_faces_version;
 
-            if let Some(mesh) = build_scene_mesh(self.entities.as_slice()) {
+            if let Some(mesh) = build_scene_mesh_with_faces(
+                self.entities.as_slice(),
+                self.sketch_faces.as_slice(),
+            ) {
                 let (vertices, indices) = mesh_to_vertex_index(&mesh);
 
                 pipeline.vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -904,15 +914,20 @@ impl SceneView {
             }
         }
 
-        if pipeline.preview_version != self.preview_version {
+        if pipeline.preview_version != self.preview_version || pipeline.sketch_version != self.sketch_version {
             pipeline.preview_version = self.preview_version;
-            let segments = self.preview_segments.as_ref();
-            if segments.is_empty() {
+            pipeline.sketch_version = self.sketch_version;
+
+            let preview_segments = self.preview_segments.as_ref();
+            let sketch_segments = self.sketch_segments.as_ref();
+            let total = preview_segments.len() + sketch_segments.len();
+
+            if total == 0 {
                 pipeline.preview_key = None;
                 pipeline.preview_vertex_count = 0;
             } else {
-                let mut vertices: Vec<GridVertex> = Vec::with_capacity(segments.len() * 2);
-                for (a, b) in segments.iter() {
+                let mut vertices: Vec<GridVertex> = Vec::with_capacity(total * 2);
+                for (a, b) in sketch_segments.iter().chain(preview_segments.iter()) {
                     vertices.push(GridVertex {
                         position: a.to_array(),
                     });

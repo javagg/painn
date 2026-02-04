@@ -1,9 +1,10 @@
 use glam::Vec3;
+use std::time::{Duration, Instant};
 
 use crate::scene::{
     camera_from_params, intersect_plane, pick_entity, ray_from_cursor, preset_angles, CameraMode,
     CameraPreset, GridPlane, SceneEntity, SceneEntityInfo, ScenePoint, SceneRect, SceneTool,
-    SolidKind,
+    SketchFace, SolidKind,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -191,8 +192,247 @@ fn circle_segments(plane: GridPlane, center: Vec3, radius: f32, steps: usize) ->
     segments
 }
 
+fn circle_points(plane: GridPlane, center: Vec3, radius: f32, steps: usize) -> Vec<Vec3> {
+    let (u, v, _) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut points: Vec<Vec3> = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius) + v * (s * radius));
+    }
+    points
+}
+
 fn dot_segments(plane: GridPlane, center: Vec3, dot_radius: f32) -> Vec<(Vec3, Vec3)> {
     circle_segments(plane, center, dot_radius.max(0.005), 12)
+}
+
+fn arc_segments(
+    plane: GridPlane,
+    center: Vec3,
+    start: Vec3,
+    end: Vec3,
+    steps: usize,
+) -> Vec<(Vec3, Vec3)> {
+    let (u, v, _) = grid_axes(plane);
+    let a = start - center;
+    let b = end - center;
+    let ax = a.dot(u);
+    let ay = a.dot(v);
+    let bx = b.dot(u);
+    let by = b.dot(v);
+    let start_angle = ay.atan2(ax);
+    let mut end_angle = by.atan2(bx);
+    if end_angle < start_angle {
+        end_angle += std::f32::consts::TAU;
+    }
+    let radius = (ax * ax + ay * ay).sqrt().max(0.02);
+    let steps = steps.max(8);
+    let mut points: Vec<Vec3> = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let t = (i as f32) / (steps as f32);
+        let angle = start_angle + (end_angle - start_angle) * t;
+        let (s, c) = angle.sin_cos();
+        points.push(center + u * (c * radius) + v * (s * radius));
+    }
+    let mut segments = Vec::with_capacity(steps);
+    for i in 0..steps {
+        segments.push((points[i], points[i + 1]));
+    }
+    segments
+}
+
+fn polyline_preview_segments(points: &[Vec3], current: Option<Vec3>) -> Vec<(Vec3, Vec3)> {
+    let mut segments: Vec<(Vec3, Vec3)> = Vec::new();
+    if points.len() >= 2 {
+        for i in 0..(points.len() - 1) {
+            segments.push((points[i], points[i + 1]));
+        }
+    }
+    if let (Some(last), Some(cur)) = (points.last().copied(), current) {
+        if last != cur {
+            segments.push((last, cur));
+        }
+    }
+    segments
+}
+
+fn ellipse_segments(
+    plane: GridPlane,
+    center: Vec3,
+    radius_u: f32,
+    radius_v: f32,
+    steps: usize,
+) -> Vec<(Vec3, Vec3)> {
+    let (u, v, _) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut points: Vec<Vec3> = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius_u) + v * (s * radius_v));
+    }
+    let mut segments = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let a = points[i];
+        let b = points[(i + 1) % steps];
+        segments.push((a, b));
+    }
+    segments
+}
+
+fn ellipse_points(
+    plane: GridPlane,
+    center: Vec3,
+    radius_u: f32,
+    radius_v: f32,
+    steps: usize,
+) -> Vec<Vec3> {
+    let (u, v, _) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut points: Vec<Vec3> = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius_u) + v * (s * radius_v));
+    }
+    points
+}
+
+fn regular_polygon_segments(
+    plane: GridPlane,
+    center: Vec3,
+    radius: f32,
+    sides: usize,
+) -> Vec<(Vec3, Vec3)> {
+    let (u, v, _) = grid_axes(plane);
+    let sides = sides.max(3);
+    let mut points: Vec<Vec3> = Vec::with_capacity(sides);
+    for i in 0..sides {
+        let t = (i as f32) / (sides as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius) + v * (s * radius));
+    }
+    let mut segments = Vec::with_capacity(sides);
+    for i in 0..sides {
+        let a = points[i];
+        let b = points[(i + 1) % sides];
+        segments.push((a, b));
+    }
+    segments
+}
+
+fn regular_polygon_points(
+    plane: GridPlane,
+    center: Vec3,
+    radius: f32,
+    sides: usize,
+) -> Vec<Vec3> {
+    let (u, v, _) = grid_axes(plane);
+    let sides = sides.max(3);
+    let mut points: Vec<Vec3> = Vec::with_capacity(sides);
+    for i in 0..sides {
+        let t = (i as f32) / (sides as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        points.push(center + u * (c * radius) + v * (s * radius));
+    }
+    points
+}
+
+fn bezier_segments(a: Vec3, b: Vec3, control: Vec3, steps: usize) -> Vec<(Vec3, Vec3)> {
+    let steps = steps.max(8);
+    let mut segments = Vec::with_capacity(steps);
+    let mut prev = a;
+    for i in 1..=steps {
+        let t = (i as f32) / (steps as f32);
+        let omt = 1.0 - t;
+        let p = a * (omt * omt) + control * (2.0 * omt * t) + b * (t * t);
+        segments.push((prev, p));
+        prev = p;
+    }
+    segments
+}
+
+fn dashed_segments(a: Vec3, b: Vec3, dash_len: f32, gap_len: f32) -> Vec<(Vec3, Vec3)> {
+    let delta = b - a;
+    let dist = delta.length();
+    if dist <= 1.0e-6 {
+        return Vec::new();
+    }
+
+    let dash_len = dash_len.max(0.001);
+    let gap_len = gap_len.max(0.001);
+    let step = dash_len + gap_len;
+    let dir = delta / dist;
+    let mut segments = Vec::new();
+    let mut t = 0.0;
+    while t < dist {
+        let start = a + dir * t;
+        let end = a + dir * (t + dash_len).min(dist);
+        segments.push((start, end));
+        t += step;
+    }
+    segments
+}
+
+fn point_cross_segments(plane: GridPlane, center: Vec3, grid_step: f32) -> Vec<(Vec3, Vec3)> {
+    let (u, v, _) = grid_axes(plane);
+    let point_size = grid_step.max(0.05) * 0.3;
+    vec![
+        (center - u * point_size, center + u * point_size),
+        (center - v * point_size, center + v * point_size),
+    ]
+}
+
+fn sketch_segments_for_tool(
+    tool: SceneTool,
+    plane: GridPlane,
+    grid_step: f32,
+    start: Vec3,
+    current: Vec3,
+) -> Vec<(Vec3, Vec3)> {
+    match tool {
+        SceneTool::SketchPoint => point_cross_segments(plane, start, grid_step),
+        SceneTool::SketchLine => vec![(start, current)],
+        SceneTool::SketchRect => {
+            let corners = rect_corners(plane, start, current);
+            line_segments_for_rect(corners)
+        }
+        SceneTool::SketchPolygon => {
+            let (u, v, _) = grid_axes(plane);
+            let du = (current - start).dot(u).abs();
+            let dv = (current - start).dot(v).abs();
+            let radius = (du * du + dv * dv).sqrt().max(0.02);
+            regular_polygon_segments(plane, start, radius, 6)
+        }
+        SceneTool::SketchCircle => {
+            let (u, v, _) = grid_axes(plane);
+            let du = (current - start).dot(u);
+            let dv = (current - start).dot(v);
+            let radius = (du * du + dv * dv).sqrt().max(0.02);
+            circle_segments(plane, start, radius, 32)
+        }
+        SceneTool::SketchEllipse => {
+            let (u, v, _) = grid_axes(plane);
+            let radius_u = (current - start).dot(u).abs().max(0.02);
+            let radius_v = (current - start).dot(v).abs().max(0.02);
+            ellipse_segments(plane, start, radius_u, radius_v, 36)
+        }
+        SceneTool::SketchArc | SceneTool::SketchBezier => {
+            let (u, v, _) = grid_axes(plane);
+            let dir = current - start;
+            let len = dir.length().max(0.02);
+            let du = dir.dot(u);
+            let dv = dir.dot(v);
+            let perp = (-dv * u + du * v).normalize_or_zero();
+            let mid = (start + current) * 0.5;
+            let factor = if matches!(tool, SceneTool::SketchArc) { 0.6 } else { 0.3 };
+            let control = mid + perp * (len * factor);
+            bezier_segments(start, current, control, 32)
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn clamp_inner_radius(outer_radius: f32, inner_radius: f32, min_minor: f32) -> f32 {
@@ -291,6 +531,15 @@ pub struct SceneModel {
     sphere_center: Option<Vec3>,
     preview_segments: Vec<(Vec3, Vec3)>,
     preview_version: u64,
+    sketch_segments: Vec<(Vec3, Vec3)>,
+    sketch_version: u64,
+    sketch_faces: Vec<SketchFace>,
+    sketch_faces_version: u64,
+    sketch_active: bool,
+    sketch_start: Option<Vec3>,
+    sketch_current: Option<Vec3>,
+    sketch_points: Vec<Vec3>,
+    last_left_click: Option<(ScenePoint, Instant)>,
     box_step: Option<BoxCreateStep>,
     box_base_start: Option<Vec3>,
     box_base_end: Option<Vec3>,
@@ -330,6 +579,15 @@ impl Default for SceneModel {
             sphere_center: None,
             preview_segments: Vec::new(),
             preview_version: 0,
+            sketch_segments: Vec::new(),
+            sketch_version: 0,
+            sketch_faces: Vec::new(),
+            sketch_faces_version: 0,
+            sketch_active: false,
+            sketch_start: None,
+            sketch_current: None,
+            sketch_points: Vec::new(),
+            last_left_click: None,
             box_step: None,
             box_base_start: None,
             box_base_end: None,
@@ -392,6 +650,7 @@ pub struct SceneUpdateResult {
     pub request_redraw: bool,
     pub capture: bool,
     pub publish_entities: Option<Vec<SceneEntityInfo>>,
+    pub finished_tool: Option<SceneTool>,
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +668,10 @@ pub struct SceneView {
     pub entities_version: u64,
     pub preview_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
     pub preview_version: u64,
+    pub sketch_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
+    pub sketch_version: u64,
+    pub sketch_faces: std::sync::Arc<Vec<SketchFace>>,
+    pub sketch_faces_version: u64,
     pub selected: Option<u64>,
     pub axes_enabled: bool,
     pub axes_size: f32,
@@ -442,6 +705,10 @@ impl SceneModel {
             entities_version: self.entities_version,
             preview_segments: std::sync::Arc::new(self.preview_segments.clone()),
             preview_version: self.preview_version,
+            sketch_segments: std::sync::Arc::new(self.sketch_segments.clone()),
+            sketch_version: self.sketch_version,
+            sketch_faces: std::sync::Arc::new(self.sketch_faces.clone()),
+            sketch_faces_version: self.sketch_faces_version,
             selected: self.selected,
             axes_enabled: config.axes_enabled,
             axes_size: config.axes_size,
@@ -483,6 +750,23 @@ impl SceneModel {
                 return result;
             }
             SceneInput::KeyEscape => {
+                if self.sketch_active {
+                    self.sketch_active = false;
+                    self.sketch_start = None;
+                    self.sketch_current = None;
+                    self.sketch_points.clear();
+                    self.dragging = Dragging::None;
+                    self.last_cursor = None;
+                    self.last_left_click = None;
+                    self.preview_segments.clear();
+                    self.preview_version = self.preview_version.wrapping_add(1);
+                    result.finished_tool = Some(config.tool);
+                    result.request_redraw = true;
+                    result.capture = true;
+                    result.handled = true;
+                    return result;
+                }
+
                 if self.box_step.is_some()
                     || self.sphere_center.is_some()
                     || self.cylinder_step.is_some()
@@ -543,6 +827,7 @@ impl SceneModel {
                     result.capture = true;
                     result.handled = true;
                 }
+
                 return result;
             }
             SceneInput::MouseUpRight => {
@@ -584,6 +869,225 @@ impl SceneModel {
                 }
             }
             SceneInput::MouseDownLeft { pos } => {
+                if config.tool.is_sketch() {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            let now = Instant::now();
+                            let double_click = self
+                                .last_left_click
+                                .map(|(last_pos, t)| {
+                                    now.duration_since(t) <= Duration::from_millis(350)
+                                        && (last_pos.x - pos.x).abs() <= 6.0
+                                        && (last_pos.y - pos.y).abs() <= 6.0
+                                })
+                                .unwrap_or(false);
+                            self.last_left_click = Some((pos, now));
+
+                            match config.tool {
+                                SceneTool::SketchPoint => {
+                                    let segments =
+                                        point_cross_segments(config.grid_plane, hit_pos, config.grid_step);
+                                    self.sketch_segments.extend(segments);
+                                    self.sketch_version = self.sketch_version.wrapping_add(1);
+                                    result.finished_tool = Some(config.tool);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                SceneTool::SketchLine => {
+                                    if !self.sketch_active {
+                                        self.sketch_active = true;
+                                        self.sketch_points.clear();
+                                        self.sketch_points.push(hit_pos);
+                                        self.sketch_current = Some(hit_pos);
+                                    } else if double_click {
+                                        if self.sketch_points.last().copied() != Some(hit_pos) {
+                                            self.sketch_points.push(hit_pos);
+                                        }
+                                        let segments =
+                                            polyline_preview_segments(&self.sketch_points, None);
+                                        if !segments.is_empty() {
+                                            self.sketch_segments.extend(segments);
+                                            self.sketch_version = self.sketch_version.wrapping_add(1);
+                                        }
+                                        self.sketch_active = false;
+                                        self.sketch_points.clear();
+                                        self.sketch_start = None;
+                                        self.sketch_current = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version = self.preview_version.wrapping_add(1);
+                                        result.finished_tool = Some(config.tool);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    } else {
+                                        self.sketch_points.push(hit_pos);
+                                        self.sketch_current = Some(hit_pos);
+                                    }
+
+                                    self.preview_segments =
+                                        polyline_preview_segments(&self.sketch_points, self.sketch_current);
+                                    self.preview_version = self.preview_version.wrapping_add(1);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                SceneTool::SketchRect
+                                | SceneTool::SketchCircle
+                                | SceneTool::SketchEllipse
+                                | SceneTool::SketchBezier
+                                | SceneTool::SketchPolygon => {
+                                    if !self.sketch_active {
+                                        self.sketch_active = true;
+                                        self.sketch_start = Some(hit_pos);
+                                        self.sketch_current = Some(hit_pos);
+                                    } else {
+                                        self.sketch_current = Some(hit_pos);
+                                        if let Some(start) = self.sketch_start {
+                                            if matches!(
+                                                config.tool,
+                                                SceneTool::SketchRect
+                                                    | SceneTool::SketchCircle
+                                                    | SceneTool::SketchEllipse
+                                                    | SceneTool::SketchPolygon
+                                            ) {
+                                                let face_points = match config.tool {
+                                                    SceneTool::SketchRect => {
+                                                        rect_corners(config.grid_plane, start, hit_pos).to_vec()
+                                                    }
+                                                    SceneTool::SketchCircle => {
+                                                        let (u, v, _) = grid_axes(config.grid_plane);
+                                                        let du = (hit_pos - start).dot(u);
+                                                        let dv = (hit_pos - start).dot(v);
+                                                        let radius = (du * du + dv * dv).sqrt().max(0.02);
+                                                        circle_points(config.grid_plane, start, radius, 48)
+                                                    }
+                                                    SceneTool::SketchEllipse => {
+                                                        let (u, v, _) = grid_axes(config.grid_plane);
+                                                        let radius_u = (hit_pos - start).dot(u).abs().max(0.02);
+                                                        let radius_v = (hit_pos - start).dot(v).abs().max(0.02);
+                                                        ellipse_points(
+                                                            config.grid_plane,
+                                                            start,
+                                                            radius_u,
+                                                            radius_v,
+                                                            48,
+                                                        )
+                                                    }
+                                                    SceneTool::SketchPolygon => {
+                                                        let (u, v, _) = grid_axes(config.grid_plane);
+                                                        let du = (hit_pos - start).dot(u).abs();
+                                                        let dv = (hit_pos - start).dot(v).abs();
+                                                        let radius = (du * du + dv * dv).sqrt().max(0.02);
+                                                        regular_polygon_points(
+                                                            config.grid_plane,
+                                                            start,
+                                                            radius,
+                                                            6,
+                                                        )
+                                                    }
+                                                    _ => Vec::new(),
+                                                };
+
+                                                if face_points.len() >= 3 {
+                                                    self.sketch_faces.push(SketchFace {
+                                                        points: face_points,
+                                                    });
+                                                    self.sketch_faces_version =
+                                                        self.sketch_faces_version.wrapping_add(1);
+                                                }
+                                            }
+
+                                            let segments = sketch_segments_for_tool(
+                                                config.tool,
+                                                config.grid_plane,
+                                                config.grid_step,
+                                                start,
+                                                hit_pos,
+                                            );
+                                            if !segments.is_empty() {
+                                                self.sketch_segments.extend(segments);
+                                                self.sketch_version = self.sketch_version.wrapping_add(1);
+                                            }
+                                        }
+                                        self.sketch_active = false;
+                                        self.sketch_start = None;
+                                        self.sketch_current = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version = self.preview_version.wrapping_add(1);
+                                        result.finished_tool = Some(config.tool);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+
+                                    if let (Some(start), Some(cur)) =
+                                        (self.sketch_start, self.sketch_current)
+                                    {
+                                        self.preview_segments = sketch_segments_for_tool(
+                                            config.tool,
+                                            config.grid_plane,
+                                            config.grid_step,
+                                            start,
+                                            cur,
+                                        );
+                                        self.preview_version = self.preview_version.wrapping_add(1);
+                                    }
+
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                SceneTool::SketchArc => {
+                                    if !self.sketch_active {
+                                        self.sketch_active = true;
+                                        self.sketch_points.clear();
+                                        self.sketch_points.push(hit_pos); // center
+                                        self.preview_segments =
+                                            point_cross_segments(config.grid_plane, hit_pos, config.grid_step);
+                                    } else if self.sketch_points.len() == 1 {
+                                        self.sketch_points.push(hit_pos); // start
+                                        self.preview_segments =
+                                            vec![(self.sketch_points[0], self.sketch_points[1])];
+                                    } else {
+                                        let center = self.sketch_points[0];
+                                        let start = self.sketch_points[1];
+                                        let end = hit_pos;
+                                        let segments =
+                                            arc_segments(config.grid_plane, center, start, end, 36);
+                                        if !segments.is_empty() {
+                                            self.sketch_segments.extend(segments);
+                                            self.sketch_version = self.sketch_version.wrapping_add(1);
+                                        }
+                                        self.sketch_active = false;
+                                        self.sketch_points.clear();
+                                        self.preview_segments.clear();
+                                        self.preview_version = self.preview_version.wrapping_add(1);
+                                        result.finished_tool = Some(config.tool);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+
+                                    self.preview_version = self.preview_version.wrapping_add(1);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                _ => {}
+                            }
+
+                        }
+                    }
+                }
+
                 if config.tool == SceneTool::Box {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
@@ -1153,6 +1657,55 @@ impl SceneModel {
                 result.handled = true;
             }
             SceneInput::MouseMove { pos } => {
+                if self.sketch_active && config.tool.is_sketch() {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            self.sketch_current = Some(hit_pos);
+                            match config.tool {
+                                SceneTool::SketchLine => {
+                                    self.preview_segments = polyline_preview_segments(
+                                        &self.sketch_points,
+                                        Some(hit_pos),
+                                    );
+                                }
+                                SceneTool::SketchArc => {
+                                    if self.sketch_points.len() == 1 {
+                                        let center = self.sketch_points[0];
+                                        let dash = config.grid_step.max(0.05) * 0.6;
+                                        self.preview_segments =
+                                            dashed_segments(center, hit_pos, dash, dash * 0.7);
+                                    } else if self.sketch_points.len() >= 2 {
+                                        let center = self.sketch_points[0];
+                                        let start = self.sketch_points[1];
+                                        let dash = config.grid_step.max(0.05) * 0.6;
+                                        let mut segments =
+                                            arc_segments(config.grid_plane, center, start, hit_pos, 36);
+                                        segments.extend(dashed_segments(center, hit_pos, dash, dash * 0.7));
+                                        self.preview_segments = segments;
+                                    }
+                                }
+                                _ => {
+                                    if let Some(start) = self.sketch_start {
+                                        self.preview_segments = sketch_segments_for_tool(
+                                            config.tool,
+                                            config.grid_plane,
+                                            config.grid_step,
+                                            start,
+                                            hit_pos,
+                                        );
+                                    }
+                                }
+                            }
+
+                            self.preview_version = self.preview_version.wrapping_add(1);
+                            result.request_redraw = true;
+                            result.capture = true;
+                            result.handled = true;
+                            return result;
+                        }
+                    }
+                }
+
                 if config.tool == SceneTool::Box {
                     if let Some(step) = self.box_step {
                         if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
