@@ -282,17 +282,58 @@ fn translate_mesh(mesh: &mut PolygonMesh, offset: Vec3) {
     }
 }
 
+fn rotate_mesh_for_plane(mesh: &mut PolygonMesh, plane: GridPlane) {
+    match plane {
+        GridPlane::XY => {}
+        GridPlane::XZ => {
+            for p in mesh.positions_mut() {
+                let (x, y, z) = (p.x, p.y, p.z);
+                p.x = x;
+                p.y = z;
+                p.z = -y;
+            }
+            for n in mesh.normals_mut() {
+                let (x, y, z) = (n.x, n.y, n.z);
+                n.x = x;
+                n.y = z;
+                n.z = -y;
+            }
+        }
+        GridPlane::YZ => {
+            for p in mesh.positions_mut() {
+                let (x, y, z) = (p.x, p.y, p.z);
+                p.x = z;
+                p.y = y;
+                p.z = -x;
+            }
+            for n in mesh.normals_mut() {
+                let (x, y, z) = (n.x, n.y, n.z);
+                n.x = z;
+                n.y = y;
+                n.z = -x;
+            }
+        }
+    }
+}
+
 fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
     let size = entity.size;
     let solid = match entity.kind {
         SolidKind::Box => cad::box_solid(size.x as f64, size.y as f64, size.z as f64),
         SolidKind::Sphere => cad::sphere((size.x * 0.5) as f64),
         SolidKind::Cylinder => cad::cylinder_solid(size.y as f64, (size.x * 0.35) as f64),
-        SolidKind::Cone => cad::cone_solid(size.y as f64, (size.x * 0.4) as f64),
-        SolidKind::Torus => cad::torus_solid((size.x * 0.7) as f64, (size.x * 0.25) as f64),
+        SolidKind::Cone => cad::cone_solid(
+            size.y as f64,
+            (size.x * 0.4) as f64,
+            (size.z * 0.4) as f64,
+        ),
+        SolidKind::Torus => cad::torus_solid(size.x as f64, size.z as f64),
     };
 
     let mut mesh = cad::to_mesh(&solid);
+    if matches!(entity.kind, SolidKind::Torus) {
+        rotate_mesh_for_plane(&mut mesh, entity.plane);
+    }
     translate_mesh(&mut mesh, entity.position);
     mesh
 }
@@ -658,6 +699,7 @@ pub struct SceneEntity {
     pub(crate) kind: SolidKind,
     pub(crate) position: Vec3,
     pub(crate) size: Vec3,
+    pub(crate) plane: GridPlane,
 }
 
 #[derive(Debug, Clone)]

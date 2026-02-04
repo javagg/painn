@@ -34,6 +34,21 @@ enum CylinderCreateStep {
     Height,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConeCreateStep {
+    BaseCenter,
+    BaseRadius,
+    TopRadius,
+    Height,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorusCreateStep {
+    Center,
+    OuterRadius,
+    InnerRadius,
+}
+
 fn height_from_cursor(
     origin: Vec3,
     dir: Vec3,
@@ -176,6 +191,18 @@ fn circle_segments(plane: GridPlane, center: Vec3, radius: f32, steps: usize) ->
     segments
 }
 
+fn dot_segments(plane: GridPlane, center: Vec3, dot_radius: f32) -> Vec<(Vec3, Vec3)> {
+    circle_segments(plane, center, dot_radius.max(0.005), 12)
+}
+
+fn clamp_inner_radius(outer_radius: f32, inner_radius: f32, min_minor: f32) -> f32 {
+    if outer_radius <= 0.0 {
+        return 0.0;
+    }
+    let max_inner = (outer_radius - min_minor * 2.0).max(0.0);
+    inner_radius.min(max_inner).max(0.0)
+}
+
 fn cylinder_frame_segments(
     plane: GridPlane,
     center: Vec3,
@@ -202,6 +229,47 @@ fn cylinder_frame_segments(
         segments.push((top_points[i], top_points[next]));
         segments.push((base_points[i], top_points[i]));
     }
+    segments
+}
+
+fn cone_frame_segments(
+    plane: GridPlane,
+    center: Vec3,
+    base_radius: f32,
+    top_radius: f32,
+    height: f32,
+    steps: usize,
+    dot_radius: f32,
+) -> Vec<(Vec3, Vec3)> {
+    let (u, v, n) = grid_axes(plane);
+    let steps = steps.max(8);
+    let mut base_points: Vec<Vec3> = Vec::with_capacity(steps);
+    let mut top_points: Vec<Vec3> = Vec::with_capacity(steps);
+    let top_center = center + n * height;
+
+    for i in 0..steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        let base = center + u * (c * base_radius) + v * (s * base_radius);
+        let top = top_center + u * (c * top_radius) + v * (s * top_radius);
+        base_points.push(base);
+        top_points.push(top);
+    }
+
+    let mut segments = Vec::with_capacity(steps * 3);
+    for i in 0..steps {
+        let next = (i + 1) % steps;
+        segments.push((base_points[i], base_points[next]));
+        if top_radius > 0.0001 {
+            segments.push((top_points[i], top_points[next]));
+        }
+        segments.push((base_points[i], top_points[i]));
+    }
+
+    if top_radius <= 0.0001 {
+        segments.extend(dot_segments(plane, top_center, dot_radius));
+    }
+
     segments
 }
 
@@ -232,6 +300,15 @@ pub struct SceneModel {
     cylinder_center: Option<Vec3>,
     cylinder_radius: Option<f32>,
     cylinder_height: Option<f32>,
+    cone_step: Option<ConeCreateStep>,
+    cone_center: Option<Vec3>,
+    cone_base_radius: Option<f32>,
+    cone_top_radius: Option<f32>,
+    cone_height: Option<f32>,
+    torus_step: Option<TorusCreateStep>,
+    torus_center: Option<Vec3>,
+    torus_outer_radius: Option<f32>,
+    torus_inner_radius: Option<f32>,
 }
 
 impl Default for SceneModel {
@@ -262,6 +339,15 @@ impl Default for SceneModel {
             cylinder_center: None,
             cylinder_radius: None,
             cylinder_height: None,
+            cone_step: None,
+            cone_center: None,
+            cone_base_radius: None,
+            cone_top_radius: None,
+            cone_height: None,
+            torus_step: None,
+            torus_center: None,
+            torus_outer_radius: None,
+            torus_inner_radius: None,
         }
     }
 }
@@ -400,6 +486,8 @@ impl SceneModel {
                 if self.box_step.is_some()
                     || self.sphere_center.is_some()
                     || self.cylinder_step.is_some()
+                    || self.cone_step.is_some()
+                    || self.torus_step.is_some()
                 {
                     self.box_step = None;
                     self.box_base_start = None;
@@ -411,6 +499,15 @@ impl SceneModel {
                     self.cylinder_center = None;
                     self.cylinder_radius = None;
                     self.cylinder_height = None;
+                    self.cone_step = None;
+                    self.cone_center = None;
+                    self.cone_base_radius = None;
+                    self.cone_top_radius = None;
+                    self.cone_height = None;
+                    self.torus_step = None;
+                    self.torus_center = None;
+                    self.torus_outer_radius = None;
+                    self.torus_inner_radius = None;
                     self.preview_segments.clear();
                     self.preview_version = self.preview_version.wrapping_add(1);
                     result.request_redraw = true;
@@ -572,6 +669,7 @@ impl SceneModel {
                                             kind: SolidKind::Box,
                                             position: center,
                                             size: size3,
+                                            plane: config.grid_plane,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -681,6 +779,7 @@ impl SceneModel {
                                             kind: SolidKind::Cylinder,
                                             position,
                                             size,
+                                            plane: config.grid_plane,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -708,6 +807,251 @@ impl SceneModel {
                     }
                 }
 
+                if config.tool == SceneTool::Cone {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            match self.cone_step.unwrap_or(ConeCreateStep::BaseCenter) {
+                                ConeCreateStep::BaseCenter => {
+                                    self.cone_step = Some(ConeCreateStep::BaseRadius);
+                                    self.cone_center = Some(hit_pos);
+                                    self.cone_base_radius = None;
+                                    self.cone_top_radius = None;
+                                    self.cone_height = None;
+
+                                    let (u, v, _) = grid_axes(config.grid_plane);
+                                    let point_size = config.grid_step.max(0.05) * 0.3;
+                                    self.preview_segments = vec![
+                                        (hit_pos - u * point_size, hit_pos + u * point_size),
+                                        (hit_pos - v * point_size, hit_pos + v * point_size),
+                                    ];
+                                    self.preview_version =
+                                        self.preview_version.wrapping_add(1);
+                                    self.last_cursor = Some(pos);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                ConeCreateStep::BaseRadius => {
+                                    if let Some(center) = self.cone_center {
+                                        let radius = (hit_pos - center).length().max(0.05);
+                                        self.cone_base_radius = Some(radius);
+                                        self.cone_step = Some(ConeCreateStep::TopRadius);
+
+                                        let segments = circle_segments(
+                                            config.grid_plane,
+                                            center,
+                                            radius,
+                                            48,
+                                        );
+                                        self.preview_segments = segments;
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                                ConeCreateStep::TopRadius => {
+                                    if let (Some(center), Some(base_radius)) =
+                                        (self.cone_center, self.cone_base_radius)
+                                    {
+                                        let radius = (hit_pos - center).length().max(0.0);
+                                        self.cone_top_radius = Some(radius);
+                                        self.cone_height = Some(0.0);
+                                        self.cone_step = Some(ConeCreateStep::Height);
+
+                                        let dot_radius = config.grid_step.max(0.05) * 0.1;
+                                        let mut segments = circle_segments(
+                                            config.grid_plane,
+                                            center,
+                                            base_radius,
+                                            48,
+                                        );
+                                        if radius > 0.0001 {
+                                            segments.extend(circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                radius,
+                                                48,
+                                            ));
+                                        } else {
+                                            segments.extend(dot_segments(
+                                                config.grid_plane,
+                                                center,
+                                                dot_radius,
+                                            ));
+                                        }
+                                        self.preview_segments = segments;
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                                ConeCreateStep::Height => {
+                                    if let (Some(center), Some(base_radius), Some(top_radius)) = (
+                                        self.cone_center,
+                                        self.cone_base_radius,
+                                        self.cone_top_radius,
+                                    ) {
+                                        let (_, _, n) = grid_axes(config.grid_plane);
+                                        let height = if let Some((origin, dir)) =
+                                            ray_from_cursor(pos, scene_bounds, &camera)
+                                        {
+                                            height_from_cursor(
+                                                origin,
+                                                dir,
+                                                center,
+                                                n,
+                                                camera.forward,
+                                            )
+                                        } else {
+                                            0.0
+                                        };
+
+                                        let h = height.max(0.05);
+                                        let size = Vec3::new(
+                                            base_radius / 0.4,
+                                            h,
+                                            top_radius / 0.4,
+                                        );
+                                        let position = center + n * (h * 0.5);
+
+                                        let id = self.next_id;
+                                        self.next_id += 1;
+                                        self.entities.push(SceneEntity {
+                                            id,
+                                            kind: SolidKind::Cone,
+                                            position,
+                                            size,
+                                            plane: config.grid_plane,
+                                        });
+                                        self.entities_version =
+                                            self.entities_version.wrapping_add(1);
+                                        result.publish_entities = Some(
+                                            self.entities.iter().map(SceneEntityInfo::from).collect(),
+                                        );
+
+                                        self.selected = Some(id);
+                                        self.cone_step = None;
+                                        self.cone_center = None;
+                                        self.cone_base_radius = None;
+                                        self.cone_top_radius = None;
+                                        self.cone_height = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if config.tool == SceneTool::Torus {
+                    if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                        if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
+                            match self.torus_step.unwrap_or(TorusCreateStep::Center) {
+                                TorusCreateStep::Center => {
+                                    self.torus_step = Some(TorusCreateStep::OuterRadius);
+                                    self.torus_center = Some(hit_pos);
+                                    self.torus_outer_radius = None;
+                                    self.torus_inner_radius = None;
+
+                                    let (u, v, _) = grid_axes(config.grid_plane);
+                                    let point_size = config.grid_step.max(0.05) * 0.3;
+                                    self.preview_segments = vec![
+                                        (hit_pos - u * point_size, hit_pos + u * point_size),
+                                        (hit_pos - v * point_size, hit_pos + v * point_size),
+                                    ];
+                                    self.preview_version =
+                                        self.preview_version.wrapping_add(1);
+                                    self.last_cursor = Some(pos);
+                                    result.request_redraw = true;
+                                    result.capture = true;
+                                    result.handled = true;
+                                    return result;
+                                }
+                                TorusCreateStep::OuterRadius => {
+                                    if let Some(center) = self.torus_center {
+                                        let outer = (hit_pos - center).length().max(0.1);
+                                        self.torus_outer_radius = Some(outer);
+                                        self.torus_step = Some(TorusCreateStep::InnerRadius);
+
+                                        let segments = circle_segments(
+                                            config.grid_plane,
+                                            center,
+                                            outer,
+                                            48,
+                                        );
+                                        self.preview_segments = segments;
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                                TorusCreateStep::InnerRadius => {
+                                    if let (Some(center), Some(outer)) =
+                                        (self.torus_center, self.torus_outer_radius)
+                                    {
+                                        let raw_inner = (hit_pos - center).length();
+                                        let inner = clamp_inner_radius(outer, raw_inner, 0.01);
+                                        self.torus_inner_radius = Some(inner);
+
+                                        let major = (outer + inner) * 0.5;
+                                        let minor = (outer - inner) * 0.5;
+                                        let size = Vec3::new(major, major, minor);
+
+                                        let id = self.next_id;
+                                        self.next_id += 1;
+                                        self.entities.push(SceneEntity {
+                                            id,
+                                            kind: SolidKind::Torus,
+                                            position: center,
+                                            size,
+                                            plane: config.grid_plane,
+                                        });
+                                        self.entities_version =
+                                            self.entities_version.wrapping_add(1);
+                                        result.publish_entities = Some(
+                                            self.entities.iter().map(SceneEntityInfo::from).collect(),
+                                        );
+
+                                        self.selected = Some(id);
+                                        self.torus_step = None;
+                                        self.torus_center = None;
+                                        self.torus_outer_radius = None;
+                                        self.torus_inner_radius = None;
+                                        self.preview_segments.clear();
+                                        self.preview_version =
+                                            self.preview_version.wrapping_add(1);
+                                        self.last_cursor = Some(pos);
+                                        result.request_redraw = true;
+                                        result.capture = true;
+                                        result.handled = true;
+                                        return result;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if config.tool == SceneTool::Sphere {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
@@ -720,6 +1064,7 @@ impl SceneModel {
                                     kind: SolidKind::Sphere,
                                     position: center,
                                     size: Vec3::splat(radius * 2.0),
+                                    plane: config.grid_plane,
                                 });
                                 self.entities_version = self.entities_version.wrapping_add(1);
                                 result.publish_entities = Some(
@@ -768,6 +1113,7 @@ impl SceneModel {
                                 kind: create_kind,
                                 position: hit_pos,
                                 size: Vec3::splat(0.2),
+                                plane: config.grid_plane,
                             });
                             self.entities_version = self.entities_version.wrapping_add(1);
                             result.publish_entities = Some(
@@ -859,6 +1205,170 @@ impl SceneModel {
                                         }
                                     }
                                     BoxCreateStep::BaseStart => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if config.tool == SceneTool::Cone {
+                    if let Some(step) = self.cone_step {
+                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(hit_pos) =
+                                intersect_plane(config.grid_plane, origin, dir)
+                            {
+                                match step {
+                                    ConeCreateStep::BaseRadius => {
+                                        if let Some(center) = self.cone_center {
+                                            let radius = (hit_pos - center).length().max(0.05);
+                                            let segments = circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                radius,
+                                                48,
+                                            );
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    ConeCreateStep::TopRadius => {
+                                        if let (Some(center), Some(base_radius)) =
+                                            (self.cone_center, self.cone_base_radius)
+                                        {
+                                            let radius = (hit_pos - center).length().max(0.0);
+                                            let dot_radius = config.grid_step.max(0.05) * 0.1;
+                                            let mut segments = circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                base_radius,
+                                                48,
+                                            );
+                                            if radius > 0.0001 {
+                                                segments.extend(circle_segments(
+                                                    config.grid_plane,
+                                                    center,
+                                                    radius,
+                                                    48,
+                                                ));
+                                            } else {
+                                                segments.extend(dot_segments(
+                                                    config.grid_plane,
+                                                    center,
+                                                    dot_radius,
+                                                ));
+                                            }
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    ConeCreateStep::Height => {
+                                        if let (Some(center), Some(base_radius), Some(top_radius)) = (
+                                            self.cone_center,
+                                            self.cone_base_radius,
+                                            self.cone_top_radius,
+                                        ) {
+                                            let (_, _, n) = grid_axes(config.grid_plane);
+                                            let height = height_from_cursor(
+                                                origin,
+                                                dir,
+                                                center,
+                                                n,
+                                                camera.forward,
+                                            );
+                                            let dot_radius = config.grid_step.max(0.05) * 0.1;
+                                            let segments = cone_frame_segments(
+                                                config.grid_plane,
+                                                center,
+                                                base_radius,
+                                                top_radius,
+                                                height,
+                                                48,
+                                                dot_radius,
+                                            );
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    ConeCreateStep::BaseCenter => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if config.tool == SceneTool::Torus {
+                    if let Some(step) = self.torus_step {
+                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(hit_pos) =
+                                intersect_plane(config.grid_plane, origin, dir)
+                            {
+                                match step {
+                                    TorusCreateStep::OuterRadius => {
+                                        if let Some(center) = self.torus_center {
+                                            let outer = (hit_pos - center).length().max(0.1);
+                                            let segments = circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                outer,
+                                                48,
+                                            );
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    TorusCreateStep::InnerRadius => {
+                                        if let (Some(center), Some(outer)) =
+                                            (self.torus_center, self.torus_outer_radius)
+                                        {
+                                            let raw_inner = (hit_pos - center).length();
+                                            let inner = clamp_inner_radius(outer, raw_inner, 0.01);
+                                            let mut segments = circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                outer,
+                                                48,
+                                            );
+                                            segments.extend(circle_segments(
+                                                config.grid_plane,
+                                                center,
+                                                inner.max(0.01),
+                                                48,
+                                            ));
+                                            self.preview_segments = segments;
+                                            self.preview_version =
+                                                self.preview_version.wrapping_add(1);
+                                            self.last_cursor = Some(pos);
+                                            result.request_redraw = true;
+                                            result.capture = true;
+                                            result.handled = true;
+                                            return result;
+                                        }
+                                    }
+                                    TorusCreateStep::Center => {}
                                 }
                             }
                         }

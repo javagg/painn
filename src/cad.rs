@@ -158,12 +158,31 @@ pub fn cylinder_solid(height: f64, radius: f64) -> Solid {
     Solid::new(vec![shell])
 }
 
-pub fn cone_solid(height: f64, radius: f64) -> Solid {
-    let v0 = builder::vertex(Point3::new(0.0, height / 2.0, 0.0));
-    let v1 = builder::vertex(Point3::new(0.0, -height / 2.0, radius));
-    let v2 = builder::vertex(Point3::new(0.0, -height / 2.0, 0.0));
-    let wire: Wire = vec![builder::line(&v0, &v1), builder::line(&v1, &v2)].into();
-    let shell = builder::cone(&wire, Vector3::unit_y(), Rad(7.0));
+pub fn cone_solid(height: f64, base_radius: f64, top_radius: f64) -> Solid {
+    if top_radius <= 1.0e-6 {
+        let v0 = builder::vertex(Point3::new(0.0, height / 2.0, 0.0));
+        let v1 = builder::vertex(Point3::new(0.0, -height / 2.0, base_radius));
+        let v2 = builder::vertex(Point3::new(0.0, -height / 2.0, 0.0));
+        let wire: Wire = vec![builder::line(&v0, &v1), builder::line(&v1, &v2)].into();
+        let shell = builder::cone(&wire, Vector3::unit_y(), Rad(7.0));
+        return Solid::new(vec![shell]);
+    }
+
+    let bottom_center = Point3::new(0.0, -height / 2.0, 0.0);
+    let top_center = Point3::new(0.0, height / 2.0, 0.0);
+    let bottom_vertex = builder::vertex(Point3::new(0.0, -height / 2.0, base_radius));
+    let top_vertex = builder::vertex(Point3::new(0.0, height / 2.0, top_radius));
+    let bottom_circle = builder::rsweep(&bottom_vertex, bottom_center, Vector3::unit_y(), Rad(7.0));
+    let top_circle = builder::rsweep(&top_vertex, top_center, Vector3::unit_y(), Rad(7.0));
+    let mut shell = builder::try_wire_homotopy(&bottom_circle, &top_circle).unwrap();
+
+    if let Ok(bottom_face) = builder::try_attach_plane(&vec![bottom_circle.clone()]) {
+        shell.push(bottom_face);
+    }
+    if let Ok(top_face) = builder::try_attach_plane(&vec![top_circle.clone()]) {
+        shell.push(top_face);
+    }
+
     Solid::new(vec![shell])
 }
 

@@ -175,7 +175,7 @@ fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
         SolidKind::Box => cad::box_solid(size, size, size),
         SolidKind::Sphere => cad::sphere(size * 0.5),
         SolidKind::Cylinder => cad::cylinder_solid(size, size * 0.35),
-        SolidKind::Cone => cad::cone_solid(size, size * 0.4),
+        SolidKind::Cone => cad::cone_solid(size, size * 0.4, 0.0),
         SolidKind::Torus => cad::torus_solid(size * 0.7, size * 0.25),
     };
 

@@ -592,8 +592,12 @@ fn entity_solid(entity: &SceneEntityInfo) -> Solid {
         SolidKind::Box => cad::box_solid(size[0] as f64, size[1] as f64, size[2] as f64),
         SolidKind::Sphere => cad::sphere((size[0] * 0.5) as f64),
         SolidKind::Cylinder => cad::cylinder_solid(size[1] as f64, (size[0] * 0.35) as f64),
-        SolidKind::Cone => cad::cone_solid(size[1] as f64, (size[0] * 0.4) as f64),
-        SolidKind::Torus => cad::torus_solid((size[0] * 0.7) as f64, (size[0] * 0.25) as f64),
+        SolidKind::Cone => cad::cone_solid(
+            size[1] as f64,
+            (size[0] * 0.4) as f64,
+            (size[2] * 0.4) as f64,
+        ),
+        SolidKind::Torus => cad::torus_solid(size[0] as f64, size[2] as f64),
     };
     solid
 }
@@ -1022,12 +1026,19 @@ pub fn scene_controls<'a>(
     let background_picker = color_picker(
         scene_bg_picker_open,
         scene_bg_color,
-        button(text("背景色")).on_press(crate::Message::SceneBackgroundPickerOpened),
+        button(text("Background")).on_press(crate::Message::SceneBackgroundPickerOpened),
         crate::Message::SceneBackgroundPickerCancelled,
         crate::Message::SceneBackgroundChanged,
     );
 
     column![
+        row![
+            button(text("📂 Open")).on_press(crate::Message::OpenFile),
+            button(text("💾 Save")).on_press(crate::Message::SaveFile),
+            button(text("💾 Save as")).on_press(crate::Message::SaveFileAs),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
         row![
             button("Load Gmsh...").on_press(crate::Message::LoadGmsh),
             text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),

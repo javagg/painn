@@ -258,7 +258,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.2, 0.9, 0.95, 0.9);
+    return vec4<f32>(0.05, 1.0, 1.0, 1.0);
 }
 "#
                 .into(),
