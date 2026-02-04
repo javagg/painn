@@ -5,9 +5,12 @@ mod canvas;
 mod cad;
 mod controls;
 mod camera;
+mod ui;
+
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
+use ui::{ribbon, RibbonAction, RibbonTab};
 use iced::widget::{column, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 #[cfg(not(target_arch = "wasm32"))]
@@ -113,6 +116,8 @@ enum Message {
     LoadGmsh,
     GmshLoaded(Result<Option<GmshLoadResult>, String>),
     Canvas(CanvasEvent),
+    RibbonTabChanged(RibbonTab),
+    RibbonAction(RibbonAction),
 }
 
 fn wrap_canvas_event(e: CanvasEvent) -> Message {
@@ -211,6 +216,7 @@ struct App {
     gmsh_mesh: Option<Arc<PolygonMesh>>,
     gmsh_mesh_version: u64,
     gmsh_status: Option<String>,
+    ribbon_tab: RibbonTab,
 }
 
 impl App {
@@ -252,6 +258,7 @@ impl App {
             gmsh_mesh: None,
             gmsh_mesh_version: 0,
             gmsh_status: None,
+            ribbon_tab: RibbonTab::Home,
         }
     }
 
@@ -458,6 +465,13 @@ impl App {
                         self.invalidate();
                     }
                 }
+            }
+            Message::RibbonTabChanged(tab) => {
+                self.ribbon_tab = tab;
+                self.invalidate();
+            }
+            Message::RibbonAction(_action) => {
+                // TODO: map ribbon actions to app commands
             }
             Message::Quit => {
                 // TODO: request app quit (platform dependent)
@@ -858,6 +872,7 @@ impl App {
             self.gmsh_status.as_deref(),
         );
 
+
         let scene_view = controls::scene_widget::<Message>(
             self.scene_show_grid,
             self.scene_grid_plane,
@@ -887,7 +902,16 @@ impl App {
             Tab::Scene => scene_tab.into(),
         };
 
-        let mut top = column![menu_bar, tab_bar];
+        let scene_ribbon = match self.active_tab {
+            Tab::Scene => Some(ribbon(
+                self.ribbon_tab,
+                Message::RibbonTabChanged,
+                Message::RibbonAction,
+            )),
+            _ => None,
+        };
+
+        let mut top = column![menu_bar, scene_ribbon, tab_bar];
         top = top.push(content);
         top
             .spacing(10)
