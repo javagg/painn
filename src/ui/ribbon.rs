@@ -2,6 +2,10 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Element, Length, Padding};
 use iced_aw::{TabBar, TabLabel};
 
+const RIBBON_HEIGHT: f32 = 150.0;
+const RIBBON_CONTENT_HEIGHT: f32 = 76.0;
+const COMPACT_GAP: f32 = 4.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RibbonTab {
 	Home,
@@ -200,38 +204,62 @@ pub fn ribbon<'a, Message: Clone + 'static>(
 
 	let groups = default_groups(active_tab)
 		.into_iter()
-		.map(|group| ribbon_group(group, &on_action))
+		.map(|group| {
+			let compact = matches!(active_tab, RibbonTab::Sketch);
+			ribbon_group(group, compact, &on_action)
+		})
 		.collect::<Vec<_>>();
 
 	let groups_row = row(groups)
 		.spacing(12)
 		.align_y(Alignment::Center);
 
-	column![tab_bar, groups_row]
+	let content = column![tab_bar, groups_row]
 		.spacing(8)
 		.padding(Padding::new(8.0))
+		.width(Length::Fill);
+
+	container(content)
+		.height(Length::Fixed(RIBBON_HEIGHT))
 		.width(Length::Fill)
 		.into()
 }
 
 fn ribbon_group<'a, Message: Clone + 'static>(
 	group: RibbonGroup,
+	compact: bool,
 	on_action: &impl Fn(RibbonAction) -> Message,
 ) -> Element<'a, Message> {
-	let buttons = group
-		.buttons
-		.into_iter()
-		.map(|b| ribbon_button(b, on_action))
-		.collect::<Vec<_>>();
-
-	let content = column![
-		row(buttons)
-			.spacing(8)
-			.align_y(Alignment::Center),
-		text(group.title).size(12),
-	]
-	.spacing(6)
-	.align_x(Alignment::Center);
+	let content = if compact {
+		let rows = group.buttons.len().max(1) as f32;
+		let total_gap = COMPACT_GAP * (rows - 1.0);
+		let button_height = ((RIBBON_CONTENT_HEIGHT - total_gap) / rows).max(20.0);
+		let buttons = group
+			.buttons
+			.into_iter()
+			.map(|b| ribbon_icon_button(b, button_height, on_action))
+			.collect::<Vec<_>>();
+		column![
+			column(buttons).spacing(COMPACT_GAP).align_x(Alignment::Center),
+			text(group.title).size(12),
+		]
+		.spacing(6)
+		.align_x(Alignment::Center)
+	} else {
+		let buttons = group
+			.buttons
+			.into_iter()
+			.map(|b| ribbon_button(b, on_action))
+			.collect::<Vec<_>>();
+		column![
+			row(buttons)
+				.spacing(8)
+				.align_y(Alignment::Center),
+			text(group.title).size(12),
+		]
+		.spacing(6)
+		.align_x(Alignment::Center)
+	};
 
 	container(content)
 		.padding(Padding::new(8.0))
@@ -254,5 +282,20 @@ fn ribbon_button<'a, Message: Clone + 'static>(
 		.on_press(on_action(button_def.action))
 		.width(Length::Fixed(72.0))
 		.height(Length::Fixed(64.0))
+		.into()
+}
+
+fn ribbon_icon_button<'a, Message: Clone + 'static>(
+	button_def: RibbonButton,
+	button_height: f32,
+	on_action: &impl Fn(RibbonAction) -> Message,
+) -> Element<'a, Message> {
+	let content = column![text(button_def.icon).size(20)]
+		.align_x(Alignment::Center);
+
+	button(content)
+		.on_press(on_action(button_def.action))
+		.width(Length::Fixed(56.0))
+		.height(Length::Fixed(button_height))
 		.into()
 }
