@@ -114,7 +114,6 @@ enum Message {
     SceneZoomIn,
     SceneZoomOut,
     SceneToolCompleted(SceneTool),
-    LoadGmsh,
     GmshLoaded(Result<Option<GmshLoadResult>, String>),
     Canvas(CanvasEvent),
     RibbonTabChanged(RibbonTab),
@@ -458,9 +457,9 @@ impl App {
                     self.invalidate();
                 }
             }
-            Message::LoadGmsh => {
-                return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
-            }
+            // Message::LoadGmsh => {
+            //     return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
+            // }
             Message::GmshLoaded(result) => {
                 match result {
                     Ok(Some(loaded)) => {
@@ -484,6 +483,32 @@ impl App {
                 match action {
                     RibbonAction::Open => {
                         return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
+                    }
+                    RibbonAction::Save => {
+                        return self.update(Message::SaveFile);
+                    }
+                    RibbonAction::SaveAs => {
+                        return self.update(Message::SaveFileAs);
+                    }
+                    RibbonAction::ZoomIn => {
+                        return self.update(Message::SceneZoomIn);
+                    }
+                    RibbonAction::ZoomOut => {
+                        return self.update(Message::SceneZoomOut);
+                    }
+                    RibbonAction::Background => {
+                        return self.update(Message::SceneBackgroundPickerOpened);
+                    }
+                    RibbonAction::GridToggle => {
+                        return self.update(Message::SceneGridToggle);
+                    }
+                    RibbonAction::GridPlaneNext => {
+                        let next = match self.scene_grid_plane {
+                            GridPlane::XY => GridPlane::YZ,
+                            GridPlane::YZ => GridPlane::XZ,
+                            GridPlane::XZ => GridPlane::XY,
+                        };
+                        return self.update(Message::SceneGridPlaneChanged(next));
                     }
                     RibbonAction::Point => {
                         self.scene_tool = SceneTool::SketchPoint;
@@ -908,7 +933,6 @@ impl App {
         );
         let stroke_row = controls::stroke_row();
         let fill_row = controls::fill_row();
-        let status = controls::status_row(self.tool, self.zoom, self.cursor_pos);
         let board = canvas::canvas(
             self.tool,
             self.shapes.as_slice(),
@@ -924,27 +948,11 @@ impl App {
         );
 
         let draw_tab = column![
-            toolbar, stroke_row, fill_row, board, status]
+            toolbar, stroke_row, fill_row, board]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
             .height(Length::Fill);
-
-        let scene_controls = controls::scene_controls(
-            self.scene_show_grid,
-            self.scene_grid_plane,
-            self.scene_tool,
-            self.scene_camera_mode,
-            self.scene_camera_preset,
-            self.scene_axes_enabled,
-            self.scene_axes_size,
-            self.scene_axes_margin,
-            self.scene_grid_extent,
-            self.scene_grid_step,
-            self.scene_bg_color,
-            self.scene_bg_picker_open,
-            self.gmsh_status.as_deref(),
-        );
 
         let scene_view = controls::scene_widget::<Message>(
             self.scene_show_grid,
@@ -958,6 +966,8 @@ impl App {
             self.scene_axes_size,
             self.scene_axes_margin,
             self.scene_bg_color,
+            self.scene_zoom_factor,
+            self.scene_zoom_version,
             self.scene_request_select_id,
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),
@@ -965,7 +975,7 @@ impl App {
         );
 
         let sidebar = controls::build_scene_sidebar(&self.scene_entities);
-        let scene_tab = row![sidebar, column![scene_controls, scene_view].spacing(10)]
+        let scene_tab = row![sidebar, column![scene_view].spacing(10)]
             .spacing(10)
             .padding(12)
             .width(Length::Fill)
@@ -976,13 +986,34 @@ impl App {
             Tab::Scene => scene_tab.into(),
         };
 
-        let scene_ribbon = match self.active_tab {
-            Tab::Scene => Some(ribbon(
-                self.ribbon_tab,
-                self.ribbon_active_action,
-                Message::RibbonTabChanged,
-                Message::RibbonAction,
-            )),
+        let scene_ribbon: Option<Element<Message>> = match self.active_tab {
+            Tab::Scene => Some(
+                column![
+                    ribbon(
+                        self.ribbon_tab,
+                        self.ribbon_active_action,
+                        Message::RibbonTabChanged,
+                        Message::RibbonAction,
+                    ),
+                    controls::scene_ribbon_controls(
+                        self.ribbon_tab,
+                        self.scene_show_grid,
+                        self.scene_grid_plane,
+                        self.scene_tool,
+                        self.scene_camera_mode,
+                        self.scene_camera_preset,
+                        self.scene_axes_enabled,
+                        self.scene_axes_size,
+                        self.scene_axes_margin,
+                        self.scene_grid_extent,
+                        self.scene_grid_step,
+                        self.scene_bg_color,
+                        self.scene_bg_picker_open,
+                    ),
+                ]
+                .spacing(8)
+                .into(),
+            ),
             _ => None,
         };
 
@@ -994,6 +1025,7 @@ impl App {
                 self.scene_camera_preset,
                 self.scene_show_grid,
                 self.gmsh_status.as_deref(),
+                self.scene_grid_plane,
             ),
         };
 

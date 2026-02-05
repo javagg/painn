@@ -687,6 +687,8 @@ struct Scene<Message> {
     axes_size: f32,
     axes_margin: f32,
     background: [f32; 4],
+    zoom_factor: f32,
+    zoom_version: u64,
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     on_tool_finished: Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
     request_select_id: Option<u64>,
@@ -696,12 +698,14 @@ struct Scene<Message> {
 #[derive(Debug, Clone)]
 struct SceneState {
     model: SceneModel,
+    last_zoom_version: u64,
 }
 
 impl Default for SceneState {
     fn default() -> Self {
         Self {
             model: SceneModel::default(),
+            last_zoom_version: 0,
         }
     }
 }
@@ -717,6 +721,13 @@ impl<Message> shader::Program<Message> for Scene<Message> {
         bounds: Rectangle,
         cursor: iced_mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
+        let mut request_redraw = false;
+        if self.zoom_version != state.last_zoom_version {
+            state.model.apply_zoom_factor(self.zoom_factor);
+            state.last_zoom_version = self.zoom_version;
+            request_redraw = true;
+        }
+
         let config = SceneConfig {
             show_grid: self.show_grid,
             grid_plane: self.grid_plane,
@@ -744,7 +755,11 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                 config,
                 requests,
             );
-            return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            if action.is_none() && request_redraw {
+                return Some(shader::Action::request_redraw());
+            }
+            return action;
         }
 
         if let Event::Keyboard(iced_keyboard::Event::KeyPressed { key, .. }) = event {
@@ -759,7 +774,11 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                if action.is_none() && request_redraw {
+                    return Some(shader::Action::request_redraw());
+                }
+                return action;
             }
 
             if matches!(key, iced_keyboard::Key::Named(iced_keyboard::key::Named::Escape)) {
@@ -769,7 +788,11 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                if action.is_none() && request_redraw {
+                    return Some(shader::Action::request_redraw());
+                }
+                return action;
             }
         }
 
@@ -812,10 +835,18 @@ impl<Message> shader::Program<Message> for Scene<Message> {
 
         if let Some(input) = input {
             let result = state.model.update(input, scene_bounds, config, requests);
-            return scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            if action.is_none() && request_redraw {
+                return Some(shader::Action::request_redraw());
+            }
+            return action;
         }
 
-        None
+        if request_redraw {
+            Some(shader::Action::request_redraw())
+        } else {
+            None
+        }
     }
 
     fn draw(&self, state: &Self::State, _cursor: iced_mouse::Cursor, _bounds: Rectangle) -> Primitive {
@@ -905,6 +936,8 @@ pub fn scene_widget<'a, Message>(
     axes_size: f32,
     axes_margin: f32,
     background: Color,
+    zoom_factor: f32,
+    zoom_version: u64,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
@@ -925,6 +958,8 @@ where
         axes_size,
         axes_margin,
         background: color_to_rgba(background),
+        zoom_factor,
+        zoom_version,
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         on_tool_finished: Some(std::rc::Rc::new(on_tool_finished)),
         request_select_id,
@@ -1030,6 +1065,7 @@ pub fn scene_status_row<'a>(
     camera_preset: Option<crate::CameraPreset>,
     show_grid: bool,
     gmsh_status: Option<&'a str>,
+    grid_plane: crate::GridPlane,
 ) -> Element<'a, crate::Message> {
     let preset_label = camera_preset
         .map(|preset| preset.to_string())
@@ -1046,13 +1082,17 @@ pub fn scene_status_row<'a>(
         text(format!("Align: {}", preset_label)),
         text("|"),
         text(grid_label),
+        text("|"),
+        text(format!("Plane: {}", grid_plane)),
+
     ]
     .spacing(10)
     .align_y(iced::Alignment::Center)
     .into()
 }
 
-pub fn scene_controls<'a>(
+pub fn scene_ribbon_controls<'a>(
+    ribbon_tab: crate::RibbonTab,
     scene_show_grid: bool,
     scene_grid_plane: crate::GridPlane,
     scene_tool: crate::SceneTool,
@@ -1065,7 +1105,6 @@ pub fn scene_controls<'a>(
     scene_grid_step: f32,
     scene_bg_color: Color,
     scene_bg_picker_open: bool,
-    gmsh_status: Option<&'a str>,
 ) -> Element<'a, crate::Message> {
     let background_picker = color_picker(
         scene_bg_picker_open,
@@ -1075,35 +1114,9 @@ pub fn scene_controls<'a>(
         crate::Message::SceneBackgroundChanged,
     );
 
-    column![
+    let tool_group = ribbon_group(
+        "Primitive",
         row![
-            button(text("💾 Save")).on_press(crate::Message::SaveFile),
-            button(text("💾 Save as")).on_press(crate::Message::SaveFileAs),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-        row![
-            text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),
-            button("Zoom In").on_press(crate::Message::SceneZoomIn),
-            button("Zoom Out").on_press(crate::Message::SceneZoomOut),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-        row![
-            button(if scene_show_grid { "Grid: On" } else { "Grid: Off" })
-                .on_press(crate::Message::SceneGridToggle),
-            text("Plane"),
-            pick_list(
-                crate::GridPlane::ALL.as_slice(),
-                Some(scene_grid_plane),
-                crate::Message::SceneGridPlaneChanged,
-            )
-            .width(Length::Fixed(120.0)),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-        row![
-            text("Primitive"),
             pick_list(
                 crate::SceneTool::ALL.as_slice(),
                 Some(scene_tool),
@@ -1112,57 +1125,106 @@ pub fn scene_controls<'a>(
             .width(Length::Fixed(160.0)),
             text("Create with left click + drag"),
         ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+
+    let camera_group = ribbon_group(
+        "Camera",
         row![
-            text("Camera"),
             pick_list(
                 crate::CameraMode::ALL.as_slice(),
                 Some(scene_camera_mode),
                 crate::Message::SceneCameraModeChanged,
             )
-            .width(Length::Fixed(160.0)),
+            .width(Length::Fixed(140.0)),
             text("Align"),
             pick_list(
                 crate::CameraPreset::ALL.as_slice(),
                 scene_camera_preset,
                 crate::Message::SceneCameraPresetChanged,
             )
-            .width(Length::Fixed(160.0)),
+            .width(Length::Fixed(140.0)),
             button("Clear Align").on_press(crate::Message::SceneCameraPresetCleared),
         ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+
+    let axes_group = ribbon_group(
+        "Axes",
         row![
             button(if scene_axes_enabled { "Axes: On" } else { "Axes: Off" })
                 .on_press(crate::Message::SceneAxesToggle),
             text("Size"),
             slider(24.0..=240.0, scene_axes_size, crate::Message::SceneAxesSizeChanged)
-                .width(Length::Fixed(200.0)),
+                .width(Length::Fixed(140.0)),
             text(format!("{:.0}", scene_axes_size)),
             text("Margin"),
             slider(0.0..=64.0, scene_axes_margin, crate::Message::SceneAxesMarginChanged)
-                .width(Length::Fixed(160.0)),
+                .width(Length::Fixed(120.0)),
             text(format!("{:.0}", scene_axes_margin)),
         ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-        row![text("背景"), background_picker]
-            .spacing(10)
-            .align_y(iced::Alignment::Center),
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+
+    let background_group = ribbon_group(
+        "Background",
+        row![background_picker]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into(),
+    );
+
+    let grid_group = ribbon_group(
+        "Grid",
         row![
             text("Range"),
             slider(0.5..=10.0, scene_grid_extent, crate::Message::SceneGridExtentChanged)
-                .width(Length::Fixed(200.0)),
+                .width(Length::Fixed(140.0)),
             text(format!("{:.2}", scene_grid_extent)),
             text("Density"),
             slider(0.05..=2.0, scene_grid_step, crate::Message::SceneGridStepChanged)
-                .width(Length::Fixed(200.0)),
+                .width(Length::Fixed(140.0)),
             text(format!("{:.2}", scene_grid_step)),
         ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center),
-    ]
-    .spacing(8)
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+
+    let content = match ribbon_tab {
+        crate::RibbonTab::View => row![grid_group, background_group]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        crate::RibbonTab::Sketch => row![tool_group]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        crate::RibbonTab::Solid => row![camera_group, axes_group]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        crate::RibbonTab::Home => container(text(""))
+            .width(Length::Shrink)
+            .into(),
+    };
+
+    content
+}
+
+fn ribbon_group<'a>(title: &'a str, content: Element<'a, crate::Message>) -> Element<'a, crate::Message> {
+    container(
+        column![content, text(title).size(12)]
+            .spacing(6)
+            .align_x(iced::Alignment::Center),
+    )
+    .padding(8)
+    .width(Length::Shrink)
     .into()
 }

@@ -38,6 +38,7 @@ pub enum RibbonAction {
 	New,
 	Open,
 	Save,
+	SaveAs,
 	Undo,
 	Redo,
     Point,
@@ -66,6 +67,13 @@ pub enum RibbonAction {
 	Section,
 	TopView,
 	IsoView,
+	ZoomIn,
+	ZoomOut,
+	FitAll,
+	FitToSelection,
+	Background,
+	GridToggle,
+	GridPlaneNext,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +105,11 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 						label: "Save",
 						action: RibbonAction::Save,
 					},
+						RibbonButton {
+							icon: "💾",
+							label: "Save As",
+							action: RibbonAction::SaveAs,
+						},
 				],
 			},
 			RibbonGroup {
@@ -221,6 +234,36 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 		],
 		RibbonTab::View => vec![
 			RibbonGroup {
+				title: "View",
+				buttons: vec![
+					RibbonButton {
+						icon: "🔍+",
+						label: "Zoom In",
+						action: RibbonAction::ZoomIn,
+					},
+					RibbonButton {
+						icon: "🔍-",
+						label: "Zoom Out",
+						action: RibbonAction::ZoomOut,
+					},
+					RibbonButton {
+						icon: "🧭",
+						label: "Grid",
+						action: RibbonAction::GridToggle,
+					},
+					RibbonButton {
+						icon: "🧭",
+						label: "Grid Plane",
+						action: RibbonAction::GridPlaneNext,
+					},
+					RibbonButton {
+						icon: "🎨",
+						label: "Background",
+						action: RibbonAction::Background,
+					},
+				],
+			},
+			RibbonGroup {
 				title: "Inspect",
 				buttons: vec![
 					RibbonButton {
@@ -248,6 +291,16 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 						label: "Iso",
 						action: RibbonAction::IsoView,
 					},
+					RibbonButton {
+						icon: "◇",
+						label: "Fit All",
+						action: RibbonAction::FitAll,
+					},
+					RibbonButton {
+						icon: "◇",
+						label: "Fit To Selection",
+						action: RibbonAction::FitToSelection,
+					}
 				],
 			},
 		],

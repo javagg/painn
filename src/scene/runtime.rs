@@ -710,6 +710,14 @@ impl SceneModel {
         self.dragging != Dragging::None
     }
 
+    pub fn apply_zoom_factor(&mut self, factor: f32) {
+        if (factor - 1.0).abs() <= f32::EPSILON {
+            return;
+        }
+        let safe = if factor.is_finite() && factor > 0.0 { factor } else { 1.0 };
+        self.distance = (self.distance / safe).clamp(0.1, 200.0);
+    }
+
     pub fn view(&self, config: SceneConfig) -> SceneView {
         let (yaw, pitch) = if let Some(p) = config.camera_preset {
             preset_angles(p)
