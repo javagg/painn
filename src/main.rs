@@ -232,7 +232,7 @@ impl App {
             scene_grid_step: 0.25,
             scene_tool: SceneTool::Select,
             scene_camera_mode: CameraMode::Orthographic,
-            scene_camera_preset: Some(CameraPreset::Iso),
+            scene_camera_preset: Some(CameraPreset::Isometric),
             scene_axes_enabled: true,
             scene_axes_size: 100.0,
             scene_axes_margin: 8.0,
@@ -565,8 +565,8 @@ impl App {
                     RibbonAction::TopView => {
                         self.scene_camera_preset = Some(CameraPreset::Top);
                     }
-                    RibbonAction::IsoView => {
-                        self.scene_camera_preset = Some(CameraPreset::Iso);
+                    RibbonAction::Isometric => {
+                        self.scene_camera_preset = Some(CameraPreset::Isometric);
                     }
                     _ => {}
                 }

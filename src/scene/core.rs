@@ -672,9 +672,11 @@ pub enum CameraPreset {
     Back,
     Left,
     Right,
-    Iso,
-    IsoLeft,
-    IsoRight,
+    Trimetric,
+    Dimetric,
+    Isometric,
+    // IsoLeft,
+    // IsoRight,
 }
 
 impl CameraPreset {
@@ -685,22 +687,26 @@ impl CameraPreset {
         CameraPreset::Back,
         CameraPreset::Left,
         CameraPreset::Right,
-        CameraPreset::Iso,
-        CameraPreset::IsoLeft,
-        CameraPreset::IsoRight,
+        CameraPreset::Trimetric,
+        CameraPreset::Dimetric,
+        CameraPreset::Isometric,
+        // CameraPreset::IsoLeft,
+        // CameraPreset::IsoRight,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            CameraPreset::Top => "Top",
-            CameraPreset::Bottom => "Bottom",
-            CameraPreset::Front => "Front",
-            CameraPreset::Back => "Back",
-            CameraPreset::Left => "Left",
-            CameraPreset::Right => "Right",
-            CameraPreset::Iso => "Isometric",
-            CameraPreset::IsoLeft => "Isometric Left",
-            CameraPreset::IsoRight => "Isometric Right",
+            CameraPreset::Top => "Top(-Z)",
+            CameraPreset::Bottom => "Bottom(+Z)",
+            CameraPreset::Left => "Left(-X)",
+            CameraPreset::Right => "Right(+X)",
+            CameraPreset::Front => "Front(+Y)",
+            CameraPreset::Back => "Back(-Y)",
+            CameraPreset::Trimetric => "Trimetric",
+            CameraPreset::Dimetric => "Dimetric",
+            CameraPreset::Isometric => "Isometric",
+            // CameraPreset::IsoLeft => "Isometric Left",
+            // CameraPreset::IsoRight => "Isometric Right",
         }
     }
 }
@@ -719,18 +725,26 @@ pub(crate) fn preset_angles(preset: CameraPreset) -> (f32, f32) {
         CameraPreset::Back => (std::f32::consts::PI, 0.0),
         CameraPreset::Left => (-std::f32::consts::FRAC_PI_2, 0.0),
         CameraPreset::Right => (std::f32::consts::FRAC_PI_2, 0.0),
-        CameraPreset::Iso => (
+        CameraPreset::Trimetric => (
+            1.0_f32.to_radians(),
+            41.810314895778596_f32.to_radians(),
+        ),
+        CameraPreset::Dimetric => (
             std::f32::consts::FRAC_PI_4,
             35.264_f32.to_radians(),
         ),
-        CameraPreset::IsoLeft => (
-            -std::f32::consts::FRAC_PI_4,
-            35.264_f32.to_radians(),
-        ),
-        CameraPreset::IsoRight => (
+        CameraPreset::Isometric => (
             std::f32::consts::FRAC_PI_4,
             35.264_f32.to_radians(),
         ),
+        // CameraPreset::IsoLeft => (
+        //     -std::f32::consts::FRAC_PI_4,
+        //     35.264_f32.to_radians(),
+        // ),
+        // CameraPreset::IsoRight => (
+        //     std::f32::consts::FRAC_PI_4,
+        //     35.264_f32.to_radians(),
+        // ),
     }
 }
 

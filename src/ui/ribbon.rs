@@ -71,7 +71,7 @@ pub enum RibbonAction {
 	Measure,
 	Section,
 	TopView,
-	IsoView,
+	Isometric,
 	ZoomIn,
 	ZoomOut,
 	FitAll,
@@ -332,7 +332,7 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 					RibbonButton {
 						icon: "◇",
 						label: "Iso",
-						action: RibbonAction::IsoView,
+						action: RibbonAction::Isometric,
 					},
 					RibbonButton {
 						icon: "◇",
