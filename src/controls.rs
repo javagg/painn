@@ -1024,6 +1024,34 @@ pub fn status_row<'a>(
     .into()
 }
 
+pub fn scene_status_row<'a>(
+    scene_tool: crate::SceneTool,
+    camera_mode: crate::CameraMode,
+    camera_preset: Option<crate::CameraPreset>,
+    show_grid: bool,
+    gmsh_status: Option<&'a str>,
+) -> Element<'a, crate::Message> {
+    let preset_label = camera_preset
+        .map(|preset| preset.to_string())
+        .unwrap_or_else(|| "Free".to_string());
+    let grid_label = if show_grid { "Grid: On" } else { "Grid: Off" };
+
+    row![
+        text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),
+        text("|"),
+        text(format!("Tool: {}", scene_tool)),
+        text("|"),
+        text(format!("Camera: {}", camera_mode)),
+        text("|"),
+        text(format!("Align: {}", preset_label)),
+        text("|"),
+        text(grid_label),
+    ]
+    .spacing(10)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 pub fn scene_controls<'a>(
     scene_show_grid: bool,
     scene_grid_plane: crate::GridPlane,
@@ -1049,14 +1077,12 @@ pub fn scene_controls<'a>(
 
     column![
         row![
-            button(text("📂 Open")).on_press(crate::Message::OpenFile),
             button(text("💾 Save")).on_press(crate::Message::SaveFile),
             button(text("💾 Save as")).on_press(crate::Message::SaveFileAs),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
         row![
-            button("Load Gmsh...").on_press(crate::Message::LoadGmsh),
             text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),
             button("Zoom In").on_press(crate::Message::SceneZoomIn),
             button("Zoom Out").on_press(crate::Message::SceneZoomOut),

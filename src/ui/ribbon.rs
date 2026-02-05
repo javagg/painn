@@ -88,11 +88,6 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 				title: "File",
 				buttons: vec![
 					RibbonButton {
-						icon: "📄",
-						label: "New",
-						action: RibbonAction::New,
-					},
-					RibbonButton {
 						icon: "📂",
 						label: "Open",
 						action: RibbonAction::Open,

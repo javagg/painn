@@ -11,7 +11,7 @@ mod ui;
 use drawing::{CanvasEvent, Draft, Shape, Tool};
 use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
 use ui::{ribbon, RibbonAction, RibbonTab};
-use iced::widget::{column, row};
+use iced::widget::{column, container, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -406,7 +406,7 @@ impl App {
                 self.invalidate();
             }
             Message::OpenFile => {
-                // TODO: file open dialog
+                return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
             }
             Message::SaveFile => {
                 // TODO: save current document
@@ -482,6 +482,9 @@ impl App {
             }
             Message::RibbonAction(action) => {
                 match action {
+                    RibbonAction::Open => {
+                        return Task::perform(pick_and_load_gmsh(), Message::GmshLoaded);
+                    }
                     RibbonAction::Point => {
                         self.scene_tool = SceneTool::SketchPoint;
                         self.ribbon_active_action = Some(action);
@@ -943,7 +946,6 @@ impl App {
             self.gmsh_status.as_deref(),
         );
 
-
         let scene_view = controls::scene_widget::<Message>(
             self.scene_show_grid,
             self.scene_grid_plane,
@@ -984,8 +986,20 @@ impl App {
             _ => None,
         };
 
+        let status_bar: Element<Message> = match self.active_tab {
+            Tab::Draw => controls::status_row(self.tool, self.zoom, self.cursor_pos),
+            Tab::Scene => controls::scene_status_row(
+                self.scene_tool,
+                self.scene_camera_mode,
+                self.scene_camera_preset,
+                self.scene_show_grid,
+                self.gmsh_status.as_deref(),
+            ),
+        };
+
         let mut top = column![menu_bar, scene_ribbon, tab_bar];
         top = top.push(content);
+        top = top.push(container(status_bar).padding(8).width(Length::Fill));
         top
             .spacing(10)
             .padding(12)
