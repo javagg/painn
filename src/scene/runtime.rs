@@ -1,10 +1,11 @@
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use std::time::{Duration, Instant};
 
 use crate::scene::{
     camera_from_params, entity_to_solid, intersect_plane, mesh_bounds, pick_entity,
     ray_from_cursor, preset_angles, CameraMode, CameraPreset, GridPlane, SceneEntity,
-    SceneEntityInfo, ScenePoint, SceneRect, SceneTool, SketchFace, SolidKind, pick_face,
+    SceneEntityInfo, ScenePoint, SceneRect, SceneTool, SelectionMode, SketchFace, SolidKind,
+    project_point,
 };
 use crate::cad;
 
@@ -270,6 +271,293 @@ fn outline_segments(points: &[Vec3]) -> Vec<(Vec3, Vec3)> {
         segments.push((a, b));
     }
     segments
+}
+
+fn screen_distance_to_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (px, py) = p;
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let dx = bx - ax;
+    let dy = by - ay;
+    if dx.abs() + dy.abs() < 1.0e-6 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    let t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+    let t = t.clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+fn point_in_polygon_2d(point: (f32, f32), poly: &[(f32, f32)]) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    let (x, y) = point;
+    let mut inside = false;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (xi, yi) = poly[i];
+        let (xj, yj) = poly[j];
+        let intersect = ((yi > y) != (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi + 1.0e-6) + xi);
+        if intersect {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn entity_aabb(entity: &SceneEntity) -> (Vec3, Vec3) {
+    let half = entity.size * 0.5;
+    let min = entity.position - half;
+    let max = entity.position + half;
+    (min, max)
+}
+
+fn entity_corners(min: Vec3, max: Vec3) -> [Vec3; 8] {
+    [
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ]
+}
+
+fn entity_edges(corners: &[Vec3; 8]) -> Vec<(Vec3, Vec3)> {
+    let idx = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    idx.iter().map(|(a, b)| (corners[*a], corners[*b])).collect()
+}
+
+fn entity_face_edges(corners: &[Vec3; 8], face: usize) -> Vec<(Vec3, Vec3)> {
+    let faces = [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [2, 3, 7, 6],
+        [1, 2, 6, 5],
+        [0, 3, 7, 4],
+    ];
+    let f = faces[face % 6];
+    vec![
+        (corners[f[0]], corners[f[1]]),
+        (corners[f[1]], corners[f[2]]),
+        (corners[f[2]], corners[f[3]]),
+        (corners[f[3]], corners[f[0]]),
+    ]
+}
+
+fn ray_box_face(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<usize> {
+    let mut tmin = (min.x - origin.x) / dir.x;
+    let mut tmax = (max.x - origin.x) / dir.x;
+    let mut face = if tmin < tmax { 0 } else { 1 };
+    if tmin > tmax {
+        std::mem::swap(&mut tmin, &mut tmax);
+    }
+
+    let mut tymin = (min.y - origin.y) / dir.y;
+    let mut tymax = (max.y - origin.y) / dir.y;
+    let ty_face = if tymin < tymax { 2 } else { 3 };
+    if tymin > tymax {
+        std::mem::swap(&mut tymin, &mut tymax);
+    }
+    if (tmin > tymax) || (tymin > tmax) {
+        return None;
+    }
+    if tymin > tmin {
+        tmin = tymin;
+        face = ty_face;
+    }
+    if tymax < tmax {
+        tmax = tymax;
+    }
+
+    let mut tzmin = (min.z - origin.z) / dir.z;
+    let mut tzmax = (max.z - origin.z) / dir.z;
+    let tz_face = if tzmin < tzmax { 4 } else { 5 };
+    if tzmin > tzmax {
+        std::mem::swap(&mut tzmin, &mut tzmax);
+    }
+    if (tmin > tzmax) || (tzmin > tmax) {
+        return None;
+    }
+    if tzmin > tmin {
+        face = tz_face;
+    }
+    Some(face)
+}
+
+fn build_mvp(camera: &crate::scene::Camera) -> Mat4 {
+    let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
+    let proj = match camera.mode {
+        CameraMode::Perspective => {
+            Mat4::perspective_rh(camera.fovy, camera.aspect, camera.near, camera.far)
+        }
+        CameraMode::Orthographic => {
+            let half_h = camera.ortho_half_h;
+            let half_w = half_h * camera.aspect;
+            Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, camera.near, camera.far)
+        }
+    };
+    proj * view
+}
+
+fn screen_point(mvp: Mat4, bounds: SceneRect, p: Vec3) -> Option<(f32, f32)> {
+    project_point(mvp, bounds, p).map(|sp| (sp.x, sp.y))
+}
+
+fn vertex_marker_segments(p: Vec3, size: f32) -> Vec<(Vec3, Vec3)> {
+    let s = size.max(0.01);
+    vec![
+        (p - Vec3::X * s, p + Vec3::X * s),
+        (p - Vec3::Y * s, p + Vec3::Y * s),
+        (p - Vec3::Z * s, p + Vec3::Z * s),
+    ]
+}
+
+fn pick_2d_vertex(
+    cursor: (f32, f32),
+    mvp: Mat4,
+    bounds: SceneRect,
+    faces: &[SketchFace],
+    tol: f32,
+) -> Option<(usize, Vec3)> {
+    let mut best: Option<(usize, Vec3, f32)> = None;
+    for (fi, face) in faces.iter().enumerate() {
+        for p in &face.points {
+            let Some(sp) = screen_point(mvp, bounds, *p) else {
+                continue;
+            };
+            let dist = ((cursor.0 - sp.0).powi(2) + (cursor.1 - sp.1).powi(2)).sqrt();
+            if dist <= tol {
+                if best.map(|b| dist < b.2).unwrap_or(true) {
+                    best = Some((fi, *p, dist));
+                }
+            }
+        }
+    }
+    best.map(|(fi, p, _)| (fi, p))
+}
+
+fn pick_2d_edge(
+    cursor: (f32, f32),
+    mvp: Mat4,
+    bounds: SceneRect,
+    faces: &[SketchFace],
+    tol: f32,
+) -> Option<(usize, (Vec3, Vec3))> {
+    let mut best: Option<(usize, (Vec3, Vec3), f32)> = None;
+    for (fi, face) in faces.iter().enumerate() {
+        if face.points.len() < 2 {
+            continue;
+        }
+        for i in 0..face.points.len() {
+            let a = face.points[i];
+            let b = face.points[(i + 1) % face.points.len()];
+            let (Some(sa), Some(sb)) = (screen_point(mvp, bounds, a), screen_point(mvp, bounds, b)) else {
+                continue;
+            };
+            let dist = screen_distance_to_segment(cursor, sa, sb);
+            if dist <= tol {
+                if best.map(|b| dist < b.2).unwrap_or(true) {
+                    best = Some((fi, (a, b), dist));
+                }
+            }
+        }
+    }
+    best.map(|(fi, seg, _)| (fi, seg))
+}
+
+fn pick_2d_face(
+    cursor: (f32, f32),
+    mvp: Mat4,
+    bounds: SceneRect,
+    faces: &[SketchFace],
+) -> Option<usize> {
+    for (fi, face) in faces.iter().enumerate() {
+        let mut poly: Vec<(f32, f32)> = Vec::with_capacity(face.points.len());
+        for p in &face.points {
+            let Some(sp) = screen_point(mvp, bounds, *p) else {
+                continue;
+            };
+            poly.push(sp);
+        }
+        if poly.len() >= 3 && point_in_polygon_2d(cursor, &poly) {
+            return Some(fi);
+        }
+    }
+    None
+}
+
+fn pick_3d_vertex(
+    cursor: (f32, f32),
+    mvp: Mat4,
+    bounds: SceneRect,
+    entities: &[SceneEntity],
+    tol: f32,
+) -> Option<(u64, Vec3)> {
+    let mut best: Option<(u64, Vec3, f32)> = None;
+    for e in entities {
+        let (min, max) = entity_aabb(e);
+        let corners = entity_corners(min, max);
+        for c in corners.iter() {
+            let Some(sp) = screen_point(mvp, bounds, *c) else {
+                continue;
+            };
+            let dist = ((cursor.0 - sp.0).powi(2) + (cursor.1 - sp.1).powi(2)).sqrt();
+            if dist <= tol {
+                if best.map(|b| dist < b.2).unwrap_or(true) {
+                    best = Some((e.id, *c, dist));
+                }
+            }
+        }
+    }
+    best.map(|(id, p, _)| (id, p))
+}
+
+fn pick_3d_edge(
+    cursor: (f32, f32),
+    mvp: Mat4,
+    bounds: SceneRect,
+    entities: &[SceneEntity],
+    tol: f32,
+) -> Option<(u64, (Vec3, Vec3))> {
+    let mut best: Option<(u64, (Vec3, Vec3), f32)> = None;
+    for e in entities {
+        let (min, max) = entity_aabb(e);
+        let corners = entity_corners(min, max);
+        let edges = entity_edges(&corners);
+        for (a, b) in edges {
+            let (Some(sa), Some(sb)) = (screen_point(mvp, bounds, a), screen_point(mvp, bounds, b)) else {
+                continue;
+            };
+            let dist = screen_distance_to_segment(cursor, sa, sb);
+            if dist <= tol {
+                if best.map(|b| dist < b.2).unwrap_or(true) {
+                    best = Some((e.id, (a, b), dist));
+                }
+            }
+        }
+    }
+    best.map(|(id, seg, _)| (id, seg))
 }
 
 fn ellipse_segments(
@@ -554,6 +842,8 @@ pub struct SceneModel {
     sketch_faces_version: u64,
     face_highlight_segments: Vec<(Vec3, Vec3)>,
     face_highlight_version: u64,
+    hover_segments: Vec<(Vec3, Vec3)>,
+    hover_version: u64,
     sketch_active: bool,
     sketch_start: Option<Vec3>,
     sketch_current: Option<Vec3>,
@@ -607,6 +897,8 @@ impl Default for SceneModel {
             sketch_faces_version: 0,
             face_highlight_segments: Vec::new(),
             face_highlight_version: 0,
+            hover_segments: Vec::new(),
+            hover_version: 0,
             sketch_active: false,
             sketch_start: None,
             sketch_current: None,
@@ -641,6 +933,7 @@ pub struct SceneConfig {
     pub grid_extent: f32,
     pub grid_step: f32,
     pub tool: SceneTool,
+    pub selection_mode: SelectionMode,
     pub camera_mode: CameraMode,
     pub camera_preset: Option<CameraPreset>,
     pub axes_enabled: bool,
@@ -676,6 +969,7 @@ pub struct SceneUpdateResult {
     pub capture: bool,
     pub publish_entities: Option<Vec<SceneEntityInfo>>,
     pub finished_tool: Option<SceneTool>,
+    pub selection_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -699,6 +993,8 @@ pub struct SceneView {
     pub sketch_faces_version: u64,
     pub face_highlight_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
     pub face_highlight_version: u64,
+    pub hover_segments: std::sync::Arc<Vec<(Vec3, Vec3)>>,
+    pub hover_version: u64,
     pub selected_entities: std::sync::Arc<Vec<u64>>,
     pub selected_entities_version: u64,
     pub axes_enabled: bool,
@@ -747,6 +1043,8 @@ impl SceneModel {
             sketch_faces_version: self.sketch_faces_version,
             face_highlight_segments: std::sync::Arc::new(self.face_highlight_segments.clone()),
             face_highlight_version: self.face_highlight_version,
+            hover_segments: std::sync::Arc::new(self.hover_segments.clone()),
+            hover_version: self.hover_version,
             selected_entities: std::sync::Arc::new(self.selected_entities.clone()),
             selected_entities_version: self.selected_entities_version,
             axes_enabled: config.axes_enabled,
@@ -837,6 +1135,7 @@ impl SceneModel {
                     self.torus_inner_radius = None;
                     self.preview_segments.clear();
                     self.preview_version = self.preview_version.wrapping_add(1);
+                    result.finished_tool = Some(config.tool);
                     result.request_redraw = true;
                     result.capture = true;
                     result.handled = true;
@@ -1340,6 +1639,7 @@ impl SceneModel {
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
                                         self.last_cursor = Some(pos);
+                                        result.finished_tool = Some(config.tool);
                                         result.request_redraw = true;
                                         result.capture = true;
                                         result.handled = true;
@@ -1450,6 +1750,7 @@ impl SceneModel {
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
                                         self.last_cursor = Some(pos);
+                                        result.finished_tool = Some(config.tool);
                                         result.request_redraw = true;
                                         result.capture = true;
                                         result.handled = true;
@@ -1603,6 +1904,7 @@ impl SceneModel {
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
                                         self.last_cursor = Some(pos);
+                                        result.finished_tool = Some(config.tool);
                                         result.request_redraw = true;
                                         result.capture = true;
                                         result.handled = true;
@@ -1697,6 +1999,7 @@ impl SceneModel {
                                         self.preview_version =
                                             self.preview_version.wrapping_add(1);
                                         self.last_cursor = Some(pos);
+                                        result.finished_tool = Some(config.tool);
                                         result.request_redraw = true;
                                         result.capture = true;
                                         result.handled = true;
@@ -1732,6 +2035,7 @@ impl SceneModel {
                                 self.preview_segments.clear();
                                 self.preview_version = self.preview_version.wrapping_add(1);
                                 self.last_cursor = Some(pos);
+                                result.finished_tool = Some(config.tool);
                                 result.request_redraw = true;
                                 result.capture = true;
                                 result.handled = true;
@@ -1756,12 +2060,145 @@ impl SceneModel {
                     }
                 }
 
-                let hit = pick_entity(pos, scene_bounds, &camera, &self.entities);
-                if let Some(id) = hit {
-                    if config.tool == SceneTool::Select {
+                if config.tool == SceneTool::Select {
+                    let cursor = (pos.x, pos.y);
+                    let mvp = build_mvp(&camera);
+                    let tol_v = 10.0;
+                    let tol_e = 8.0;
+
+                    let mut selection_label: Option<String> = None;
+                    let mut selection_segments: Vec<(Vec3, Vec3)> = Vec::new();
+                    let mut selection_entity: Option<u64> = None;
+                    let mut selection_face: Option<usize> = None;
+
+                    let mut selected_body: Option<u64> = None;
+
+                    let pick_face_segments = |id: u64| -> Option<Vec<(Vec3, Vec3)>> {
+                        let Some(entity) = self.entities.iter().find(|e| e.id == id) else {
+                            return None;
+                        };
+                        let (min, max) = entity_aabb(entity);
+                        if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
+                            if let Some(face_idx) = ray_box_face(origin, dir, min, max) {
+                                let corners = entity_corners(min, max);
+                                return Some(entity_face_edges(&corners, face_idx));
+                            }
+                        }
+                        None
+                    };
+
+                    match config.selection_mode {
+                        SelectionMode::Vertex => {
+                            if let Some((fi, p)) =
+                                pick_2d_vertex(cursor, mvp, scene_bounds, &self.sketch_faces, tol_v)
+                            {
+                                selection_label = Some(format!("Vertex2D {}", fi + 1));
+                                selection_segments =
+                                    point_cross_segments(config.grid_plane, p, config.grid_step);
+                                selection_face = Some(fi);
+                            } else if let Some((id, p)) =
+                                pick_3d_vertex(cursor, mvp, scene_bounds, &self.entities, tol_v)
+                            {
+                                selection_label = Some(format!("Vertex {}", id));
+                                selection_segments =
+                                    vertex_marker_segments(p, config.grid_step.max(0.05) * 0.4);
+                                selection_entity = Some(id);
+                            }
+                        }
+                        SelectionMode::Edge => {
+                            if let Some((fi, seg)) =
+                                pick_2d_edge(cursor, mvp, scene_bounds, &self.sketch_faces, tol_e)
+                            {
+                                selection_label = Some(format!("Edge2D {}", fi + 1));
+                                selection_segments = vec![seg];
+                                selection_face = Some(fi);
+                            } else if let Some((id, seg)) =
+                                pick_3d_edge(cursor, mvp, scene_bounds, &self.entities, tol_e)
+                            {
+                                selection_label = Some(format!("Edge {}", id));
+                                selection_segments = vec![seg];
+                                selection_entity = Some(id);
+                            }
+                        }
+                        SelectionMode::Face => {
+                            if let Some(fi) =
+                                pick_2d_face(cursor, mvp, scene_bounds, &self.sketch_faces)
+                            {
+                                selection_label = Some(format!("Face2D {}", fi + 1));
+                                if let Some(face) = self.sketch_faces.get(fi) {
+                                    selection_segments = outline_segments(&face.points);
+                                    selection_face = Some(fi);
+                                }
+                            } else if let Some(id) =
+                                pick_entity(pos, scene_bounds, &camera, &self.entities)
+                            {
+                                if let Some(segments) = pick_face_segments(id) {
+                                    selection_label = Some(format!("Face {}", id));
+                                    selection_segments = segments;
+                                    selection_entity = Some(id);
+                                }
+                            }
+                        }
+                        SelectionMode::Body => {
+                            if let Some(id) = pick_entity(pos, scene_bounds, &camera, &self.entities)
+                            {
+                                selected_body = Some(id);
+                                selection_label = Some(format!("Body {}", id));
+                            }
+                        }
+                        SelectionMode::Mixed => {
+                            if let Some((fi, p)) =
+                                pick_2d_vertex(cursor, mvp, scene_bounds, &self.sketch_faces, tol_v)
+                            {
+                                selection_label = Some(format!("Vertex2D {}", fi + 1));
+                                selection_segments =
+                                    point_cross_segments(config.grid_plane, p, config.grid_step);
+                                selection_face = Some(fi);
+                            } else if let Some((id, p)) =
+                                pick_3d_vertex(cursor, mvp, scene_bounds, &self.entities, tol_v)
+                            {
+                                selection_label = Some(format!("Vertex {}", id));
+                                selection_segments =
+                                    vertex_marker_segments(p, config.grid_step.max(0.05) * 0.4);
+                                selection_entity = Some(id);
+                            } else if let Some((fi, seg)) =
+                                pick_2d_edge(cursor, mvp, scene_bounds, &self.sketch_faces, tol_e)
+                            {
+                                selection_label = Some(format!("Edge2D {}", fi + 1));
+                                selection_segments = vec![seg];
+                                selection_face = Some(fi);
+                            } else if let Some((id, seg)) =
+                                pick_3d_edge(cursor, mvp, scene_bounds, &self.entities, tol_e)
+                            {
+                                selection_label = Some(format!("Edge {}", id));
+                                selection_segments = vec![seg];
+                                selection_entity = Some(id);
+                            } else if let Some(fi) =
+                                pick_2d_face(cursor, mvp, scene_bounds, &self.sketch_faces)
+                            {
+                                selection_label = Some(format!("Face2D {}", fi + 1));
+                                if let Some(face) = self.sketch_faces.get(fi) {
+                                    selection_segments = outline_segments(&face.points);
+                                    selection_face = Some(fi);
+                                }
+                            } else if let Some(id) =
+                                pick_entity(pos, scene_bounds, &camera, &self.entities)
+                            {
+                                if let Some(segments) = pick_face_segments(id) {
+                                    selection_label = Some(format!("Face {}", id));
+                                    selection_segments = segments;
+                                    selection_entity = Some(id);
+                                } else {
+                                    selected_body = Some(id);
+                                    selection_label = Some(format!("Body {}", id));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(id) = selection_entity.or(selected_body) {
                         if self.modifiers.shift {
-                            if let Some(pos) =
-                                self.selected_entities.iter().position(|v| *v == id)
+                            if let Some(pos) = self.selected_entities.iter().position(|v| *v == id)
                             {
                                 self.selected_entities.remove(pos);
                             } else {
@@ -1771,58 +2208,32 @@ impl SceneModel {
                             self.selected_entities.clear();
                             self.selected_entities.push(id);
                         }
-
                         self.selected = self.selected_entities.last().copied();
                         self.selected_entities_version =
                             self.selected_entities_version.wrapping_add(1);
-                        self.selected_face = None;
-                        self.face_highlight_segments.clear();
-                        self.face_highlight_version =
-                            self.face_highlight_version.wrapping_add(1);
+                    } else {
+                        self.selected = None;
+                        self.selected_entities.clear();
+                        self.selected_entities_version =
+                            self.selected_entities_version.wrapping_add(1);
+                    }
 
-                        if !self.modifiers.shift && self.selected_entities.len() == 1 {
-                            self.dragging = Dragging::MoveEntity;
-                        } else {
-                            self.dragging = Dragging::None;
-                        }
+                    let can_drag = selected_body.is_some()
+                        && !self.modifiers.shift
+                        && matches!(config.selection_mode, SelectionMode::Body | SelectionMode::Mixed);
+                    self.dragging = if can_drag {
+                        Dragging::MoveEntity
                     } else {
-                        self.selected = Some(id);
-                        self.selected_entities.clear();
-                        self.selected_entities.push(id);
-                        self.selected_entities_version =
-                            self.selected_entities_version.wrapping_add(1);
-                        self.selected_face = None;
-                        self.face_highlight_segments.clear();
-                        self.face_highlight_version =
-                            self.face_highlight_version.wrapping_add(1);
-                        self.dragging = Dragging::MoveEntity;
-                    }
-                } else if config.tool == SceneTool::Select {
-                    let face_hit = pick_face(pos, scene_bounds, &camera, &self.sketch_faces);
-                    if let Some(index) = face_hit {
-                        self.selected = None;
-                        self.selected_entities.clear();
-                        self.selected_entities_version =
-                            self.selected_entities_version.wrapping_add(1);
-                        self.selected_face = Some(index);
-                        if let Some(face) = self.sketch_faces.get(index) {
-                            self.face_highlight_segments = outline_segments(&face.points);
-                            self.face_highlight_version =
-                                self.face_highlight_version.wrapping_add(1);
-                        } else {
-                            self.face_highlight_segments.clear();
-                            self.face_highlight_version =
-                                self.face_highlight_version.wrapping_add(1);
-                        }
-                    } else {
-                        self.selected = None;
-                        self.selected_entities.clear();
-                        self.selected_entities_version =
-                            self.selected_entities_version.wrapping_add(1);
-                        self.selected_face = None;
-                        self.face_highlight_segments.clear();
-                        self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
-                    }
+                        Dragging::None
+                    };
+
+                    self.selected_face = selection_face;
+                    self.face_highlight_segments = selection_segments;
+                    self.face_highlight_version = self.face_highlight_version.wrapping_add(1);
+                    result.selection_label = selection_label.or(Some("None".to_string()));
+                    result.request_redraw = true;
+                    result.capture = true;
+                    result.handled = true;
                 } else if let Some(create_kind) = config.tool.create_kind() {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {
@@ -1882,6 +2293,116 @@ impl SceneModel {
                 result.handled = true;
             }
             SceneInput::MouseMove { pos } => {
+                if config.tool == SceneTool::Select {
+                    let cursor = (pos.x, pos.y);
+                    let mvp = build_mvp(&camera);
+                    let tol_v = 10.0;
+                    let tol_e = 8.0;
+
+                    let mut hover_segments: Vec<(Vec3, Vec3)> = Vec::new();
+                    let mut found = false;
+
+                    match config.selection_mode {
+                        SelectionMode::Vertex => {
+                            if let Some((_, p)) =
+                                pick_2d_vertex(cursor, mvp, scene_bounds, &self.sketch_faces, tol_v)
+                            {
+                                hover_segments =
+                                    point_cross_segments(config.grid_plane, p, config.grid_step);
+                                found = true;
+                            } else if let Some((_, p)) =
+                                pick_3d_vertex(cursor, mvp, scene_bounds, &self.entities, tol_v)
+                            {
+                                hover_segments =
+                                    vertex_marker_segments(p, config.grid_step.max(0.05) * 0.4);
+                                found = true;
+                            }
+                        }
+                        SelectionMode::Edge => {
+                            if let Some((_, seg)) =
+                                pick_2d_edge(cursor, mvp, scene_bounds, &self.sketch_faces, tol_e)
+                            {
+                                hover_segments = vec![seg];
+                                found = true;
+                            } else if let Some((_, seg)) =
+                                pick_3d_edge(cursor, mvp, scene_bounds, &self.entities, tol_e)
+                            {
+                                hover_segments = vec![seg];
+                                found = true;
+                            }
+                        }
+                        SelectionMode::Face => {
+                            if let Some(fi) = pick_2d_face(cursor, mvp, scene_bounds, &self.sketch_faces)
+                            {
+                                if let Some(face) = self.sketch_faces.get(fi) {
+                                    hover_segments = outline_segments(&face.points);
+                                    found = true;
+                                }
+                            }
+                        }
+                        SelectionMode::Body => {
+                            if let Some(id) = pick_entity(pos, scene_bounds, &camera, &self.entities)
+                            {
+                                if let Some(entity) = self.entities.iter().find(|e| e.id == id) {
+                                    let (min, max) = entity_aabb(entity);
+                                    let corners = entity_corners(min, max);
+                                    hover_segments = entity_edges(&corners);
+                                    found = true;
+                                }
+                            }
+                        }
+                        SelectionMode::Mixed => {
+                            if let Some((_, p)) =
+                                pick_2d_vertex(cursor, mvp, scene_bounds, &self.sketch_faces, tol_v)
+                            {
+                                hover_segments =
+                                    point_cross_segments(config.grid_plane, p, config.grid_step);
+                                found = true;
+                            } else if let Some((_, p)) =
+                                pick_3d_vertex(cursor, mvp, scene_bounds, &self.entities, tol_v)
+                            {
+                                hover_segments =
+                                    vertex_marker_segments(p, config.grid_step.max(0.05) * 0.4);
+                                found = true;
+                            } else if let Some((_, seg)) =
+                                pick_2d_edge(cursor, mvp, scene_bounds, &self.sketch_faces, tol_e)
+                            {
+                                hover_segments = vec![seg];
+                                found = true;
+                            } else if let Some((_, seg)) =
+                                pick_3d_edge(cursor, mvp, scene_bounds, &self.entities, tol_e)
+                            {
+                                hover_segments = vec![seg];
+                                found = true;
+                            } else if let Some(fi) =
+                                pick_2d_face(cursor, mvp, scene_bounds, &self.sketch_faces)
+                            {
+                                if let Some(face) = self.sketch_faces.get(fi) {
+                                    hover_segments = outline_segments(&face.points);
+                                    found = true;
+                                }
+                            } else if let Some(id) =
+                                pick_entity(pos, scene_bounds, &camera, &self.entities)
+                            {
+                                if let Some(entity) = self.entities.iter().find(|e| e.id == id) {
+                                    let (min, max) = entity_aabb(entity);
+                                    let corners = entity_corners(min, max);
+                                    hover_segments = entity_edges(&corners);
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if found {
+                        self.hover_segments = hover_segments;
+                    } else if !self.hover_segments.is_empty() {
+                        self.hover_segments.clear();
+                    }
+                    self.hover_version = self.hover_version.wrapping_add(1);
+                    result.request_redraw = true;
+                }
+
                 if self.sketch_active && config.tool.is_sketch() {
                     if let Some((origin, dir)) = ray_from_cursor(pos, scene_bounds, &camera) {
                         if let Some(hit_pos) = intersect_plane(config.grid_plane, origin, dir) {

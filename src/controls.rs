@@ -20,7 +20,7 @@ use crate::cad;
 use crate::scene::{
     CameraMode, CameraPreset, GridPlane, Pipeline, SceneConfig, SceneEntityInfo, SceneInput,
     SceneModel, ScenePoint, SceneRect, SceneRequests, SceneTool, SceneUpdateResult, SceneView,
-    SolidKind,
+    SelectionMode, SolidKind,
 };
 use iced_aw::menu;
 
@@ -683,6 +683,7 @@ struct Scene<Message> {
     grid_extent: f32,
     grid_step: f32,
     tool: SceneTool,
+    selection_mode: SelectionMode,
     camera_mode: CameraMode,
     camera_preset: Option<CameraPreset>,
     axes_enabled: bool,
@@ -694,6 +695,7 @@ struct Scene<Message> {
     unite_version: u64,
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     on_tool_finished: Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
+    on_selection_label: Option<std::rc::Rc<dyn Fn(String) -> Message + 'static>>,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
 }
@@ -739,6 +741,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             grid_extent: self.grid_extent,
             grid_step: self.grid_step,
             tool: self.tool,
+            selection_mode: self.selection_mode,
             camera_mode: self.camera_mode,
             camera_preset: self.camera_preset,
             axes_enabled: self.axes_enabled,
@@ -759,7 +762,12 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                 config,
                 requests,
             );
-            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            let action = scene_action(
+                result,
+                &self.on_entities_snapshot,
+                &self.on_tool_finished,
+                &self.on_selection_label,
+            );
             if action.is_some() {
                 return action;
             }
@@ -777,7 +785,12 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                 config,
                 requests,
             );
-            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            let action = scene_action(
+                result,
+                &self.on_entities_snapshot,
+                &self.on_tool_finished,
+                &self.on_selection_label,
+            );
             if action.is_none() && request_redraw {
                 return Some(shader::Action::request_redraw());
             }
@@ -796,7 +809,12 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                let action = scene_action(
+                    result,
+                    &self.on_entities_snapshot,
+                    &self.on_tool_finished,
+                    &self.on_selection_label,
+                );
                 if action.is_none() && request_redraw {
                     return Some(shader::Action::request_redraw());
                 }
@@ -810,7 +828,12 @@ impl<Message> shader::Program<Message> for Scene<Message> {
                     config,
                     requests,
                 );
-                let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+                let action = scene_action(
+                    result,
+                    &self.on_entities_snapshot,
+                    &self.on_tool_finished,
+                    &self.on_selection_label,
+                );
                 if action.is_none() && request_redraw {
                     return Some(shader::Action::request_redraw());
                 }
@@ -857,7 +880,12 @@ impl<Message> shader::Program<Message> for Scene<Message> {
 
         if let Some(input) = input {
             let result = state.model.update(input, scene_bounds, config, requests);
-            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            let action = scene_action(
+                result,
+                &self.on_entities_snapshot,
+                &self.on_tool_finished,
+                &self.on_selection_label,
+            );
             if action.is_none() && request_redraw {
                 return Some(shader::Action::request_redraw());
             }
@@ -878,6 +906,7 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             grid_extent: self.grid_extent,
             grid_step: self.grid_step,
             tool: self.tool,
+            selection_mode: self.selection_mode,
             camera_mode: self.camera_mode,
             camera_preset: self.camera_preset,
             axes_enabled: self.axes_enabled,
@@ -910,10 +939,12 @@ fn scene_action<Message>(
     result: SceneUpdateResult,
     on_entities_snapshot: &Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     on_tool_finished: &Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
+    on_selection_label: &Option<std::rc::Rc<dyn Fn(String) -> Message + 'static>>,
 ) -> Option<shader::Action<Message>> {
     if !result.handled
         && result.publish_entities.is_none()
         && result.finished_tool.is_none()
+        && result.selection_label.is_none()
         && !result.request_redraw
     {
         return None;
@@ -924,6 +955,14 @@ fn scene_action<Message>(
             shader::Action::publish(cb(list))
         } else {
             shader::Action::request_redraw()
+        }
+    } else if let Some(label) = result.selection_label {
+        if let Some(cb) = on_selection_label {
+            shader::Action::publish(cb(label))
+        } else if result.request_redraw {
+            shader::Action::request_redraw()
+        } else {
+            return None;
         }
     } else if let Some(tool) = result.finished_tool {
         if let Some(cb) = on_tool_finished {
@@ -952,6 +991,7 @@ pub fn scene_widget<'a, Message>(
     grid_extent: f32,
     grid_step: f32,
     tool: SceneTool,
+    selection_mode: SelectionMode,
     camera_mode: CameraMode,
     camera_preset: Option<CameraPreset>,
     axes_enabled: bool,
@@ -965,6 +1005,7 @@ pub fn scene_widget<'a, Message>(
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
     on_tool_finished: impl Fn(SceneTool) -> Message + 'static,
+    on_selection_label: impl Fn(String) -> Message + 'static,
 ) -> Element<'a, Message>
 where
     Message: 'a,
@@ -975,6 +1016,7 @@ where
         grid_extent,
         grid_step,
         tool,
+        selection_mode,
         camera_mode,
         camera_preset,
         axes_enabled,
@@ -986,6 +1028,7 @@ where
         unite_version,
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         on_tool_finished: Some(std::rc::Rc::new(on_tool_finished)),
+        on_selection_label: Some(std::rc::Rc::new(on_selection_label)),
         request_select_id,
         request_focus_id,
     })
@@ -1085,6 +1128,7 @@ pub fn status_row<'a>(
 
 pub fn scene_status_row<'a>(
     scene_tool: crate::SceneTool,
+    selection_label: Option<&'a str>,
     camera_mode: crate::CameraMode,
     camera_preset: Option<crate::CameraPreset>,
     show_grid: bool,
@@ -1095,11 +1139,20 @@ pub fn scene_status_row<'a>(
         .map(|preset| preset.to_string())
         .unwrap_or_else(|| "Free".to_string());
     let grid_label = if show_grid { "Grid: On" } else { "Grid: Off" };
+    let mode_label = if scene_tool == crate::SceneTool::Select {
+        "Mode: Select"
+    } else {
+        "Mode: Create (Single)"
+    };
 
     row![
         text(gmsh_status.unwrap_or("No Gmsh mesh loaded")),
         text("|"),
         text(format!("Tool: {}", scene_tool)),
+        text("|"),
+        text(mode_label),
+        text("|"),
+        text(format!("Selection: {}", selection_label.unwrap_or("None"))),
         text("|"),
         text(format!("Camera: {}", camera_mode)),
         text("|"),
@@ -1120,6 +1173,7 @@ pub fn scene_ribbon_controls<'a>(
     _scene_show_grid: bool,
     _scene_grid_plane: crate::GridPlane,
     scene_tool: crate::SceneTool,
+    scene_selection_mode: crate::SelectionMode,
     scene_camera_mode: crate::CameraMode,
     scene_camera_preset: Option<crate::CameraPreset>,
     scene_axes_enabled: bool,
@@ -1138,7 +1192,7 @@ pub fn scene_ribbon_controls<'a>(
         crate::Message::SceneBackgroundChanged,
     );
 
-    let tool_group = ribbon_group(
+    let _tool_group = ribbon_group(
         "Primitive",
         row![
             pick_list(
@@ -1148,6 +1202,22 @@ pub fn scene_ribbon_controls<'a>(
             )
             .width(Length::Fixed(160.0)),
             text("Create with left click + drag"),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    );
+
+    let selection_group = ribbon_group(
+        "Selection",
+        row![
+            pick_list(
+                crate::SelectionMode::ALL.as_slice(),
+                Some(scene_selection_mode),
+                crate::Message::SceneSelectionModeChanged,
+            )
+            .width(Length::Fixed(140.0)),
+            text("Pick: body/face/edge/vertex"),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
@@ -1226,11 +1296,11 @@ pub fn scene_ribbon_controls<'a>(
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),
-        crate::RibbonTab::Sketch => row![/*tool_group*/]
+        crate::RibbonTab::Sketch => row![selection_group]
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),
-        crate::RibbonTab::Solid => row![camera_group, axes_group]
+        crate::RibbonTab::Solid => row![selection_group, camera_group, axes_group]
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),

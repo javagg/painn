@@ -9,7 +9,7 @@ mod ui;
 
 
 use drawing::{CanvasEvent, Draft, Shape, Tool};
-use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool};
+use scene::{CameraMode, CameraPreset, GridPlane, SceneEntityInfo, SceneTool, SelectionMode};
 use ui::{ribbon, RibbonAction, RibbonTab};
 use iced::widget::{column, container, row};
 use iced::{Alignment, Color, Element, Length, Size, Task};
@@ -113,6 +113,8 @@ enum Message {
     SceneSidebarTabSelected(SceneSidebarTab),
     SceneZoomIn,
     SceneZoomOut,
+    SceneSelectionModeChanged(SelectionMode),
+    SceneSelectionLabelChanged(String),
     SceneToolCompleted(SceneTool),
     GmshLoaded(Result<Option<GmshLoadResult>, String>),
     Canvas(CanvasEvent),
@@ -195,6 +197,8 @@ struct App {
     scene_axes_margin: f32,
     scene_bg_color: Color,
     scene_bg_picker_open: bool,
+    scene_selection_mode: SelectionMode,
+    scene_selection_label: Option<String>,
     stroke_width: f32,
     stroke_color: Color,
     fill_color: Option<Color>,
@@ -239,6 +243,8 @@ impl App {
             scene_axes_margin: 8.0,
             scene_bg_color: Color::from_rgb8(0x1E, 0x1F, 0x24),
             scene_bg_picker_open: false,
+            scene_selection_mode: SelectionMode::Mixed,
+            scene_selection_label: None,
             stroke_width: 3.0,
             stroke_color: Color::from_rgb8(0xE6, 0xE6, 0xE6),
             fill_color: None,
@@ -452,8 +458,16 @@ impl App {
                 self.scene_zoom_version = self.scene_zoom_version.wrapping_add(1);
                 self.invalidate();
             }
+            Message::SceneSelectionModeChanged(mode) => {
+                self.scene_selection_mode = mode;
+                self.invalidate();
+            }
+            Message::SceneSelectionLabelChanged(label) => {
+                self.scene_selection_label = Some(label);
+                self.invalidate();
+            }
             Message::SceneToolCompleted(tool) => {
-                if tool.is_sketch() {
+                if tool != SceneTool::Select {
                     self.scene_tool = SceneTool::Select;
                     self.ribbon_active_action = None;
                     self.invalidate();
@@ -966,6 +980,7 @@ impl App {
             self.scene_grid_extent,
             self.scene_grid_step,
             self.scene_tool,
+            self.scene_selection_mode,
             self.scene_camera_mode,
             self.scene_camera_preset,
             self.scene_axes_enabled,
@@ -979,6 +994,7 @@ impl App {
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),
             Message::SceneToolCompleted,
+            Message::SceneSelectionLabelChanged,
         );
 
         let sidebar = controls::build_scene_sidebar(&self.scene_entities);
@@ -1007,6 +1023,7 @@ impl App {
                         self.scene_show_grid,
                         self.scene_grid_plane,
                         self.scene_tool,
+                        self.scene_selection_mode,
                         self.scene_camera_mode,
                         self.scene_camera_preset,
                         self.scene_axes_enabled,
@@ -1028,6 +1045,7 @@ impl App {
             Tab::Draw => controls::status_row(self.tool, self.zoom, self.cursor_pos),
             Tab::Scene => controls::scene_status_row(
                 self.scene_tool,
+                self.scene_selection_label.as_deref(),
                 self.scene_camera_mode,
                 self.scene_camera_preset,
                 self.scene_show_grid,

@@ -842,6 +842,41 @@ pub enum SceneTool {
     SketchBezier,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    Body,
+    Face,
+    Edge,
+    Vertex,
+    Mixed,
+}
+
+impl SelectionMode {
+    pub const ALL: [SelectionMode; 5] = [
+        SelectionMode::Body,
+        SelectionMode::Face,
+        SelectionMode::Edge,
+        SelectionMode::Vertex,
+        SelectionMode::Mixed,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectionMode::Body => "Body",
+            SelectionMode::Face => "Face",
+            SelectionMode::Edge => "Edge",
+            SelectionMode::Vertex => "Vertex",
+            SelectionMode::Mixed => "Mixed",
+        }
+    }
+}
+
+impl std::fmt::Display for SelectionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 impl SceneTool {
     pub const ALL: [SceneTool; 6] = [
         SceneTool::Select,

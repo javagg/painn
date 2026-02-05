@@ -45,6 +45,10 @@ pub struct Pipeline {
     pub(crate) preview_version: u64,
     pub(crate) sketch_version: u64,
     pub(crate) face_highlight_version: u64,
+    pub(crate) hover_version: u64,
+    pub(crate) hover_pipeline: wgpu::RenderPipeline,
+    pub(crate) hover_vertices: wgpu::Buffer,
+    pub(crate) hover_vertex_count: u32,
     pub(crate) highlight_pipeline: wgpu::RenderPipeline,
     pub(crate) highlight_vertices: wgpu::Buffer,
     pub(crate) highlight_vertex_count: u32,
@@ -635,6 +639,82 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let hover_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_hover_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.2, 0.9, 1.0, 0.9);
+}
+"#
+                .into(),
+            ),
+        });
+
+        let hover_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_hover_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &hover_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hover_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Axes overlay pipeline (no uniforms, colored lines in clip space)
         let axes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene_axes_shader"),
@@ -768,6 +848,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             preview_version: 0,
             sketch_version: 0,
             face_highlight_version: 0,
+            hover_version: 0,
+            hover_pipeline,
+            hover_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_hover_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            hover_vertex_count: 0,
             highlight_pipeline,
             highlight_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_highlight_vertices"),
@@ -1071,6 +1160,31 @@ impl SceneView {
             }
         }
 
+        if pipeline.hover_version != self.hover_version {
+            pipeline.hover_version = self.hover_version;
+            let hover_segments = self.hover_segments.as_ref();
+            if hover_segments.is_empty() {
+                pipeline.hover_vertex_count = 0;
+            } else {
+                let mut vertices: Vec<GridVertex> = Vec::with_capacity(hover_segments.len() * 2);
+                for (a, b) in hover_segments.iter() {
+                    vertices.push(GridVertex {
+                        position: a.to_array(),
+                    });
+                    vertices.push(GridVertex {
+                        position: b.to_array(),
+                    });
+                }
+                pipeline.hover_vertices =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("scene_hover_vertices"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                pipeline.hover_vertex_count = vertices.len() as u32;
+            }
+        }
+
         if pipeline.selected_entities_version != self.selected_entities_version
             || pipeline.entities_version != self.entities_version
         {
@@ -1192,6 +1306,13 @@ impl SceneView {
             render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
             render_pass.set_vertex_buffer(0, pipeline.preview_vertices.slice(..));
             render_pass.draw(0..pipeline.preview_vertex_count, 0..1);
+        }
+
+        if pipeline.hover_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.hover_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.hover_vertices.slice(..));
+            render_pass.draw(0..pipeline.hover_vertex_count, 0..1);
         }
 
         if pipeline.highlight_vertex_count > 0 {
