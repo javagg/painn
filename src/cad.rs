@@ -281,19 +281,6 @@ fn cylinder(bottom: f64, height: f64, radius: f64) -> Shell {
     solid.into_boundaries().pop().unwrap()
 }
 
-// sew the body and the neck
-#[allow(dead_code)]
-fn glue_body_neck(body: &mut Shell, neck: Shell) {
-    // get the body's ceiling
-    let body_ceiling = body.last_mut().unwrap();
-    // the boundary of the neck's bottom
-    let wire = neck[0].boundaries()[0].clone();
-    // drill a hole in the body using the boundary of the neck's bottom
-    body_ceiling.add_boundary(wire);
-    // add the faces of the neck to the body other than the bottom
-    body.extend(neck.into_iter().skip(1));
-}
-
 pub fn solid_unite(solids: &[Solid]) -> Solid {
     let Some((first, rest)) = solids.split_first() else {
         return Solid::new(Vec::new());
