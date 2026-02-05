@@ -8,7 +8,7 @@ const COMPACT_GAP: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RibbonTab {
-	Home,
+	Main,
 	Sketch,
 	Solid,
 	View,
@@ -16,7 +16,7 @@ pub enum RibbonTab {
 
 impl RibbonTab {
 	pub const ALL: [RibbonTab; 4] = [
-		RibbonTab::Home,
+		RibbonTab::Main,
 		RibbonTab::Sketch,
 		RibbonTab::Solid,
 		RibbonTab::View,
@@ -24,7 +24,7 @@ impl RibbonTab {
 
 	pub fn label(self) -> &'static str {
 		match self {
-			RibbonTab::Home => "Home",
+			RibbonTab::Main => "Main",
 			RibbonTab::Sketch => "Sketch",
 			RibbonTab::Solid => "Solid",
 			RibbonTab::View => "View",
@@ -97,7 +97,7 @@ pub struct RibbonGroup {
 
 pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 	match tab {
-		RibbonTab::Home => vec![
+		RibbonTab::Main => vec![
 			RibbonGroup {
 				title: "File",
 				buttons: vec![

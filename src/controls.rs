@@ -1226,7 +1226,7 @@ pub fn scene_ribbon_controls<'a>(
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),
-        crate::RibbonTab::Sketch => row![tool_group]
+        crate::RibbonTab::Sketch => row![/*tool_group*/]
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),
@@ -1234,7 +1234,7 @@ pub fn scene_ribbon_controls<'a>(
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .into(),
-        crate::RibbonTab::Home => container(text(""))
+        crate::RibbonTab::Main => container(text(""))
             .width(Length::Shrink)
             .into(),
     };

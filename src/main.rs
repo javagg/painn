@@ -261,7 +261,7 @@ impl App {
             gmsh_mesh: None,
             gmsh_mesh_version: 0,
             gmsh_status: None,
-            ribbon_tab: RibbonTab::Home,
+            ribbon_tab: RibbonTab::Main,
             ribbon_active_action: None,
         }
     }
