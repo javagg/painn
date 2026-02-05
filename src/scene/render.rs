@@ -34,6 +34,10 @@ pub struct Pipeline {
     pub(crate) grid_vertices: wgpu::Buffer,
     pub(crate) grid_vertex_count: u32,
     pub(crate) grid_key: Option<GridKey>,
+    pub(crate) grid_fade_pipeline: wgpu::RenderPipeline,
+    pub(crate) grid_fade_vertices: wgpu::Buffer,
+    pub(crate) grid_fade_vertex_count: u32,
+    pub(crate) grid_fade_key: Option<GridKey>,
     pub(crate) preview_pipeline: wgpu::RenderPipeline,
     pub(crate) preview_vertices: wgpu::Buffer,
     pub(crate) preview_vertex_count: u32,
@@ -187,6 +191,42 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#
                 .into(),
+            ),
+        });
+
+        let grid_fade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scene_grid_fade_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+struct Uniforms {
+    model_view: mat4x4<f32>,
+    mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = uniforms.mvp * vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.55, 0.58, 0.66, 0.18);
+}
+"#
+                    .into(),
             ),
         });
 
@@ -475,6 +515,46 @@ fn fs_main() -> @location(0) vec4<f32> {
             cache: None,
         });
 
+        let grid_fade_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("scene_grid_fade_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_fade_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_fade_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let preview_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene_preview_pipeline"),
             layout: Some(&pipeline_layout),
@@ -667,6 +747,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             }),
             grid_vertex_count: 0,
             grid_key: None,
+            grid_fade_pipeline,
+            grid_fade_vertices: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("scene_grid_fade_vertices"),
+                size: 4,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            }),
+            grid_fade_vertex_count: 0,
+            grid_fade_key: None,
             preview_pipeline,
             preview_vertices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("scene_preview_vertices"),
@@ -758,6 +847,13 @@ impl SceneView {
             bounds,
             self.camera_mode,
         );
+
+        let plane_normal = match self.grid_plane {
+            GridPlane::XY => Vec3::Z,
+            GridPlane::YZ => Vec3::X,
+            GridPlane::XZ => Vec3::Y,
+        };
+        let grid_visible = self.show_grid && plane_normal.dot(camera.forward).abs() > 0.15;
 
         let view = Mat4::look_at_rh(camera.eye, camera.eye + camera.forward, Vec3::Y);
 
@@ -855,20 +951,35 @@ impl SceneView {
         });
         pipeline.axes_vertex_count = axes_vertices.len() as u32;
 
+        let base_step = self.grid_step.max(0.05);
+        let camera_distance = (camera.eye - self.target).length().max(0.1);
+        let zoom_scale = (self.grid_extent / camera_distance).clamp(1.0, 8.0);
+        let effective_step = if zoom_scale > 1.5 {
+            (base_step / zoom_scale).max(base_step / 8.0)
+        } else {
+            base_step
+        };
+
         let grid_key = GridKey {
-            enabled: self.show_grid,
+            enabled: grid_visible,
             plane: self.grid_plane,
             extent: self.grid_extent,
-            step: self.grid_step,
+            step: effective_step,
         };
-        if pipeline.grid_key != Some(grid_key) {
+        if pipeline.grid_key != Some(grid_key) || pipeline.grid_fade_key != Some(grid_key) {
             pipeline.grid_key = Some(grid_key);
-            if !self.show_grid {
+            pipeline.grid_fade_key = Some(grid_key);
+            if !grid_visible {
                 pipeline.grid_vertex_count = 0;
+                pipeline.grid_fade_vertex_count = 0;
             } else {
                 let extent = self.grid_extent.max(0.5);
-                let step = self.grid_step.max(0.05);
+                let step = effective_step;
+                let outer_extent = (extent * 4.0).max(extent + step * 2.0);
+
                 let vertices = build_grid_vertices(self.grid_plane, extent, step);
+                let outer_vertices = build_grid_vertices(self.grid_plane, outer_extent, step);
+                let faded_vertices = filter_outer_grid_vertices(self.grid_plane, extent, outer_vertices);
 
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("scene_grid_vertices"),
@@ -877,6 +988,14 @@ impl SceneView {
                 });
                 pipeline.grid_vertices = buffer;
                 pipeline.grid_vertex_count = vertices.len() as u32;
+
+                let fade_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("scene_grid_fade_vertices"),
+                    contents: bytemuck::cast_slice(&faded_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                pipeline.grid_fade_vertices = fade_buffer;
+                pipeline.grid_fade_vertex_count = faded_vertices.len() as u32;
             }
         }
 
@@ -1054,6 +1173,13 @@ impl SceneView {
         render_pass.set_bind_group(0, &pipeline.background_bind_group, &[]);
         render_pass.draw(0..3, 0..1);
 
+        if pipeline.grid_fade_vertex_count > 0 {
+            render_pass.set_pipeline(&pipeline.grid_fade_pipeline);
+            render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, pipeline.grid_fade_vertices.slice(..));
+            render_pass.draw(0..pipeline.grid_fade_vertex_count, 0..1);
+        }
+
         if pipeline.grid_vertex_count > 0 {
             render_pass.set_pipeline(&pipeline.grid_pipeline);
             render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
@@ -1103,4 +1229,52 @@ impl SceneView {
             render_pass.set_viewport(bx, by, bw, bh, 0.0, 1.0);
         }
     }
+}
+
+fn filter_outer_grid_vertices(
+    plane: GridPlane,
+    inner_extent: f32,
+    vertices: Vec<GridVertex>,
+) -> Vec<GridVertex> {
+    if vertices.is_empty() {
+        return vertices;
+    }
+
+    let mut filtered = Vec::with_capacity(vertices.len());
+    let mut i = 0;
+    while i + 1 < vertices.len() {
+        let a = vertices[i].position;
+        let b = vertices[i + 1].position;
+        let keep = match plane {
+            GridPlane::XY => {
+                let ax = a[0].abs();
+                let ay = a[1].abs();
+                let bx = b[0].abs();
+                let by = b[1].abs();
+                (ax > inner_extent && bx > inner_extent) || (ay > inner_extent && by > inner_extent)
+            }
+            GridPlane::YZ => {
+                let ay = a[1].abs();
+                let az = a[2].abs();
+                let by = b[1].abs();
+                let bz = b[2].abs();
+                (ay > inner_extent && by > inner_extent) || (az > inner_extent && bz > inner_extent)
+            }
+            GridPlane::XZ => {
+                let ax = a[0].abs();
+                let az = a[2].abs();
+                let bx = b[0].abs();
+                let bz = b[2].abs();
+                (ax > inner_extent && bx > inner_extent) || (az > inner_extent && bz > inner_extent)
+            }
+        };
+
+        if keep {
+            filtered.push(GridVertex { position: a });
+            filtered.push(GridVertex { position: b });
+        }
+        i += 2;
+    }
+
+    filtered
 }

@@ -583,6 +583,7 @@ fn solid_label(kind: SolidKind) -> &'static str {
         SolidKind::Cylinder => "Cylinder",
         SolidKind::Cone => "Cone",
         SolidKind::Torus => "Torus",
+        SolidKind::Custom => "Custom",
     }
 }
 
@@ -598,6 +599,7 @@ fn entity_solid(entity: &SceneEntityInfo) -> Solid {
             (size[2] * 0.4) as f64,
         ),
         SolidKind::Torus => cad::torus_solid(size[0] as f64, size[2] as f64),
+        SolidKind::Custom => cad::box_solid(size[0] as f64, size[1] as f64, size[2] as f64),
     };
     solid
 }
@@ -689,6 +691,7 @@ struct Scene<Message> {
     background: [f32; 4],
     zoom_factor: f32,
     zoom_version: u64,
+    unite_version: u64,
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     on_tool_finished: Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
     request_select_id: Option<u64>,
@@ -699,6 +702,7 @@ struct Scene<Message> {
 struct SceneState {
     model: SceneModel,
     last_zoom_version: u64,
+    last_unite_version: u64,
 }
 
 impl Default for SceneState {
@@ -706,6 +710,7 @@ impl Default for SceneState {
         Self {
             model: SceneModel::default(),
             last_zoom_version: 0,
+            last_unite_version: 0,
         }
     }
 }
@@ -745,6 +750,23 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             select_id: self.request_select_id,
             focus_id: self.request_focus_id,
         };
+
+        if self.unite_version != state.last_unite_version {
+            state.last_unite_version = self.unite_version;
+            let result = state.model.update(
+                SceneInput::Unite,
+                to_scene_rect(bounds),
+                config,
+                requests,
+            );
+            let action = scene_action(result, &self.on_entities_snapshot, &self.on_tool_finished);
+            if action.is_some() {
+                return action;
+            }
+            if request_redraw {
+                return Some(shader::Action::request_redraw());
+            }
+        }
 
         if let Event::Keyboard(iced_keyboard::Event::ModifiersChanged(mods)) = event {
             let result = state.model.update(
@@ -938,6 +960,7 @@ pub fn scene_widget<'a, Message>(
     background: Color,
     zoom_factor: f32,
     zoom_version: u64,
+    unite_version: u64,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
@@ -960,6 +983,7 @@ where
         background: color_to_rgba(background),
         zoom_factor,
         zoom_version,
+        unite_version,
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         on_tool_finished: Some(std::rc::Rc::new(on_tool_finished)),
         request_select_id,
@@ -1093,8 +1117,8 @@ pub fn scene_status_row<'a>(
 
 pub fn scene_ribbon_controls<'a>(
     ribbon_tab: crate::RibbonTab,
-    scene_show_grid: bool,
-    scene_grid_plane: crate::GridPlane,
+    _scene_show_grid: bool,
+    _scene_grid_plane: crate::GridPlane,
     scene_tool: crate::SceneTool,
     scene_camera_mode: crate::CameraMode,
     scene_camera_preset: Option<crate::CameraPreset>,

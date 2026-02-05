@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec3, Vec4};
 use crate::cad;
-use truck_modeling::Point3;
+use truck_modeling::{Point3, Solid};
 use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
 
 #[repr(C)]
@@ -260,6 +260,7 @@ pub(crate) fn entity_radius(entity: &SceneEntity) -> f32 {
         SolidKind::Cylinder => max_size * 0.6,
         SolidKind::Cone => max_size * 0.6,
         SolidKind::Torus => max_size * 0.8,
+        SolidKind::Custom => max_size * 0.6,
     }
 }
 
@@ -375,7 +376,11 @@ fn rotate_mesh_for_plane(mesh: &mut PolygonMesh, plane: GridPlane) {
     }
 }
 
-fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
+pub(crate) fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
+    if let Some(mesh) = entity.mesh.as_ref() {
+        return mesh.clone();
+    }
+
     let size = entity.size;
     let solid = match entity.kind {
         SolidKind::Box => cad::box_solid(size.x as f64, size.y as f64, size.z as f64),
@@ -387,6 +392,7 @@ fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
             (size.z * 0.4) as f64,
         ),
         SolidKind::Torus => cad::torus_solid(size.x as f64, size.z as f64),
+        SolidKind::Custom => cad::box_solid(size.x as f64, size.y as f64, size.z as f64),
     };
 
     let mut mesh = cad::to_mesh(&solid);
@@ -395,6 +401,42 @@ fn entity_to_mesh(entity: &SceneEntity) -> PolygonMesh {
     }
     translate_mesh(&mut mesh, entity.position);
     mesh
+}
+
+pub(crate) fn entity_to_solid(entity: &SceneEntity) -> Solid {
+    let size = entity.size;
+    let center = [entity.position.x as f64, entity.position.y as f64, entity.position.z as f64];
+    let solid = match entity.kind {
+        SolidKind::Box => cad::box_solid_at(center, size.x as f64, size.y as f64, size.z as f64),
+        SolidKind::Sphere => cad::sphere_at(center, (size.x * 0.5) as f64),
+        SolidKind::Cylinder => {
+            cad::cylinder_solid_at(center, size.y as f64, (size.x * 0.35) as f64)
+        }
+        SolidKind::Cone => cad::cone_solid_at(
+            center,
+            size.y as f64,
+            (size.x * 0.4) as f64,
+            (size.z * 0.4) as f64,
+        ),
+        SolidKind::Torus => cad::torus_solid_at(center, size.x as f64, size.z as f64),
+        SolidKind::Custom => cad::box_solid_at(center, size.x as f64, size.y as f64, size.z as f64),
+    };
+    solid
+}
+
+pub(crate) fn mesh_bounds(mesh: &PolygonMesh) -> Option<(Vec3, Vec3)> {
+    let positions = mesh.positions();
+    let first = positions.first()?;
+    let mut min = Vec3::new(first.x as f32, first.y as f32, first.z as f32);
+    let mut max = min;
+
+    for p in positions.iter().skip(1) {
+        let v = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+        min = min.min(v);
+        max = max.max(v);
+    }
+
+    Some((min, max))
 }
 
 pub(crate) fn build_scene_mesh(entities: &[SceneEntity]) -> Option<PolygonMesh> {
@@ -641,6 +683,7 @@ pub enum GridPlane {
 }
 
 impl GridPlane {
+    #[allow(dead_code)]
     pub const ALL: [GridPlane; 3] = [GridPlane::XY, GridPlane::YZ, GridPlane::XZ];
 
     pub fn label(self) -> &'static str {
@@ -778,6 +821,7 @@ pub enum SolidKind {
     Cylinder,
     Cone,
     Torus,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -874,6 +918,7 @@ pub struct SceneEntity {
     pub(crate) position: Vec3,
     pub(crate) size: Vec3,
     pub(crate) plane: GridPlane,
+    pub(crate) mesh: Option<PolygonMesh>,
 }
 
 #[derive(Debug, Clone)]

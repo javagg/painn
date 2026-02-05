@@ -50,6 +50,7 @@ pub enum RibbonAction {
 	Circle,
     Ellipse,
     Arc,
+	Select,
     Box,
     Sphere,
     Cone,
@@ -187,6 +188,11 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 			RibbonGroup {
 				title: "Create",
 				buttons: vec![
+                    RibbonButton {
+                        icon: "+",
+                        label: "Select",
+                        action: RibbonAction::Select,
+                    },					
                     RibbonButton {
                         icon: "🧊",
                         label: "Box",

@@ -2,10 +2,11 @@ use glam::Vec3;
 use std::time::{Duration, Instant};
 
 use crate::scene::{
-    camera_from_params, intersect_plane, pick_entity, ray_from_cursor, preset_angles, CameraMode,
-    CameraPreset, GridPlane, SceneEntity, SceneEntityInfo, ScenePoint, SceneRect, SceneTool,
-    SketchFace, SolidKind, pick_face,
+    camera_from_params, entity_to_solid, intersect_plane, mesh_bounds, pick_entity,
+    ray_from_cursor, preset_angles, CameraMode, CameraPreset, GridPlane, SceneEntity,
+    SceneEntityInfo, ScenePoint, SceneRect, SceneTool, SketchFace, SolidKind, pick_face,
 };
+use crate::cad;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SceneModifiers {
@@ -659,6 +660,7 @@ pub enum SceneInput {
     ModifiersChanged { shift: bool },
     KeyDelete,
     KeyEscape,
+    Unite,
     MouseWheel { delta_lines: f32 },
     MouseDownLeft { pos: ScenePoint },
     MouseUpLeft,
@@ -924,6 +926,76 @@ impl SceneModel {
         );
 
         match input {
+            SceneInput::Unite => {
+                let mut ids = if !self.selected_entities.is_empty() {
+                    self.selected_entities.clone()
+                } else if let Some(id) = self.selected {
+                    vec![id]
+                } else {
+                    Vec::new()
+                };
+
+                ids.sort_unstable();
+                ids.dedup();
+
+                if ids.len() < 2 {
+                    return result;
+                }
+
+                let mut selected = Vec::new();
+                for id in &ids {
+                    if let Some(entity) = self.entities.iter().find(|e| e.id == *id) {
+                        selected.push(entity);
+                    }
+                }
+
+                if selected.len() < 2 {
+                    return result;
+                }
+
+                let solids = selected
+                    .iter()
+                    .map(|entity| entity_to_solid(entity))
+                    .collect::<Vec<_>>();
+                let solid = cad::solid_unite(solids.as_slice());
+                let mesh = cad::to_mesh(&solid);
+
+                let (min, max) = match mesh_bounds(&mesh) {
+                    Some(bounds) => bounds,
+                    None => return result,
+                };
+
+                let center = (min + max) * 0.5;
+                let size = (max - min).max(Vec3::splat(0.01));
+
+                let new_id = self.next_id;
+                self.next_id += 1;
+
+                self.entities.retain(|e| !ids.iter().any(|id| *id == e.id));
+                self.entities.push(SceneEntity {
+                    id: new_id,
+                    kind: SolidKind::Custom,
+                    position: center,
+                    size,
+                    plane: config.grid_plane,
+                    mesh: Some(mesh),
+                });
+
+                self.entities_version = self.entities_version.wrapping_add(1);
+                self.selected = Some(new_id);
+                self.selected_entities.clear();
+                self.selected_entities.push(new_id);
+                self.selected_entities_version =
+                    self.selected_entities_version.wrapping_add(1);
+
+                result.publish_entities = Some(
+                    self.entities.iter().map(SceneEntityInfo::from).collect(),
+                );
+                result.request_redraw = true;
+                result.capture = true;
+                result.handled = true;
+                return result;
+            }
             SceneInput::MouseWheel { delta_lines } => {
                 if delta_lines.abs() > f32::EPSILON {
                     let factor = 1.1_f32.powf(delta_lines);
@@ -1250,6 +1322,7 @@ impl SceneModel {
                                             position: center,
                                             size: size3,
                                             plane: config.grid_plane,
+                                            mesh: None,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -1360,6 +1433,7 @@ impl SceneModel {
                                             position,
                                             size,
                                             plane: config.grid_plane,
+                                            mesh: None,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -1511,6 +1585,7 @@ impl SceneModel {
                                             position,
                                             size,
                                             plane: config.grid_plane,
+                                            mesh: None,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -1605,6 +1680,7 @@ impl SceneModel {
                                             position: center,
                                             size,
                                             plane: config.grid_plane,
+                                            mesh: None,
                                         });
                                         self.entities_version =
                                             self.entities_version.wrapping_add(1);
@@ -1645,6 +1721,7 @@ impl SceneModel {
                                     position: center,
                                     size: Vec3::splat(radius * 2.0),
                                     plane: config.grid_plane,
+                                    mesh: None,
                                 });
                                 self.entities_version = self.entities_version.wrapping_add(1);
                                 result.publish_entities = Some(
@@ -1757,6 +1834,7 @@ impl SceneModel {
                                 position: hit_pos,
                                 size: Vec3::splat(0.2),
                                 plane: config.grid_plane,
+                                mesh: None,
                             });
                             self.entities_version = self.entities_version.wrapping_add(1);
                             result.publish_entities = Some(
