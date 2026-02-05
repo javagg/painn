@@ -58,11 +58,16 @@ pub enum RibbonAction {
 	Extrude,
 	Rotate,
 	Mirror,
-	Translate,
+	Move,
 	Scale,
 	Revolve,
 	Fillet,
 	Chamfer,
+	Unite,
+	Subtract,
+	Intersect,
+	Split,
+	Imprint,
 	Measure,
 	Section,
 	TopView,
@@ -207,18 +212,56 @@ pub fn default_groups(tab: RibbonTab) -> Vec<RibbonGroup> {
 						label: "Cone",
 						action: RibbonAction::Cone,
 					},
-
-					
+				],
+			},
+			RibbonGroup {
+				title: "Transform",
+				buttons: vec![
+					RibbonButton {
+						icon: "→",
+						label: "Move",
+						action: RibbonAction::Move,
+					},					
 					RibbonButton {
 						icon: "⟳",
-						label: "Revolve",
-						action: RibbonAction::Revolve,
+						label: "Rotate",
+						action: RibbonAction::Rotate,
+					},
+					RibbonButton {
+						icon: "⇋",
+						label: "Mirror",
+						action: RibbonAction::Mirror,
 					},
 				],
 			},
 			RibbonGroup {
 				title: "Modify",
 				buttons: vec![
+					RibbonButton {
+						icon: "∪",
+						label: "Unite",
+						action: RibbonAction::Unite,
+					},
+					RibbonButton {
+						icon: "−",
+						label: "Subtract",
+						action: RibbonAction::Subtract,
+					},
+					RibbonButton {
+						icon: "∩",
+						label: "Intersect",
+						action: RibbonAction::Intersect,
+					},
+					RibbonButton {
+						icon: "÷",
+						label: "Split",
+						action: RibbonAction::Split,
+					},
+					RibbonButton {
+						icon: "✎",
+						label: "Imprint",
+						action: RibbonAction::Imprint,
+					},
 					RibbonButton {
 						icon: "◝",
 						label: "Fillet",
