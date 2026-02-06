@@ -3,7 +3,7 @@
 use truck_meshalgo::prelude::*;
 use truck_modeling::*;
 use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
-use truck_shapeops::or;
+use truck_shapeops::{and, or};
 
 use meshx::mesh::TetMesh;
 #[cfg(not(target_arch = "wasm32"))]
@@ -289,6 +289,32 @@ pub fn solid_unite(solids: &[Solid]) -> Solid {
     let mut result = first.clone();
     for solid in rest {
         if let Some(next) = or(&result, solid, 1.0e-6) {
+            result = next;
+        }
+    }
+    result
+}
+
+pub fn solid_intersect(solids: &[Solid]) -> Solid {
+    let Some((first, rest)) = solids.split_first() else {
+        return Solid::new(Vec::new());
+    };
+
+    let mut result = first.clone();
+    for solid in rest {
+        if let Some(next) = and(&result, solid, 1.0e-6) {
+            result = next;
+        }
+    }
+    result
+}
+
+pub fn solid_subtract(base: &Solid, cutters: &[Solid]) -> Solid {
+    let mut result = base.clone();
+    for solid in cutters {
+        let mut cutter = solid.clone();
+        cutter.not();
+        if let Some(next) = and(&result, &cutter, 1.0e-6) {
             result = next;
         }
     }

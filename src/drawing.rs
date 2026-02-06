@@ -1,4 +1,5 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#![allow(dead_code)]
 
 use iced::mouse;
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Program, Stroke};

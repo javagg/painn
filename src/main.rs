@@ -219,6 +219,8 @@ struct App {
     scene_zoom_factor: f32,
     scene_zoom_version: u64,
     scene_unite_version: u64,
+    scene_subtract_version: u64,
+    scene_intersect_version: u64,
     gmsh_mesh: Option<Arc<PolygonMesh>>,
     gmsh_mesh_version: u64,
     gmsh_status: Option<String>,
@@ -264,6 +266,8 @@ impl App {
             scene_zoom_factor: 1.0,
             scene_zoom_version: 0,
             scene_unite_version: 0,
+            scene_subtract_version: 0,
+            scene_intersect_version: 0,
             gmsh_mesh: None,
             gmsh_mesh_version: 0,
             gmsh_status: None,
@@ -529,6 +533,14 @@ impl App {
                     RibbonAction::Unite => {
                         self.scene_unite_version =
                             self.scene_unite_version.wrapping_add(1);
+                    }
+                    RibbonAction::Subtract => {
+                        self.scene_subtract_version =
+                            self.scene_subtract_version.wrapping_add(1);
+                    }
+                    RibbonAction::Intersect => {
+                        self.scene_intersect_version =
+                            self.scene_intersect_version.wrapping_add(1);
                     }
                     RibbonAction::Point => {
                         self.scene_tool = SceneTool::SketchPoint;
@@ -990,6 +1002,8 @@ impl App {
             self.scene_zoom_factor,
             self.scene_zoom_version,
             self.scene_unite_version,
+            self.scene_subtract_version,
+            self.scene_intersect_version,
             self.scene_request_select_id,
             self.scene_request_focus_id,
             |list| Message::SceneEntitiesSnapshot(list),

@@ -693,6 +693,8 @@ struct Scene<Message> {
     zoom_factor: f32,
     zoom_version: u64,
     unite_version: u64,
+    subtract_version: u64,
+    intersect_version: u64,
     on_entities_snapshot: Option<std::rc::Rc<dyn Fn(Vec<SceneEntityInfo>) -> Message + 'static>>,
     on_tool_finished: Option<std::rc::Rc<dyn Fn(SceneTool) -> Message + 'static>>,
     on_selection_label: Option<std::rc::Rc<dyn Fn(String) -> Message + 'static>>,
@@ -705,6 +707,8 @@ struct SceneState {
     model: SceneModel,
     last_zoom_version: u64,
     last_unite_version: u64,
+    last_subtract_version: u64,
+    last_intersect_version: u64,
 }
 
 impl Default for SceneState {
@@ -713,6 +717,8 @@ impl Default for SceneState {
             model: SceneModel::default(),
             last_zoom_version: 0,
             last_unite_version: 0,
+            last_subtract_version: 0,
+            last_intersect_version: 0,
         }
     }
 }
@@ -758,6 +764,50 @@ impl<Message> shader::Program<Message> for Scene<Message> {
             state.last_unite_version = self.unite_version;
             let result = state.model.update(
                 SceneInput::Unite,
+                to_scene_rect(bounds),
+                config,
+                requests,
+            );
+            let action = scene_action(
+                result,
+                &self.on_entities_snapshot,
+                &self.on_tool_finished,
+                &self.on_selection_label,
+            );
+            if action.is_some() {
+                return action;
+            }
+            if request_redraw {
+                return Some(shader::Action::request_redraw());
+            }
+        }
+
+        if self.subtract_version != state.last_subtract_version {
+            state.last_subtract_version = self.subtract_version;
+            let result = state.model.update(
+                SceneInput::Subtract,
+                to_scene_rect(bounds),
+                config,
+                requests,
+            );
+            let action = scene_action(
+                result,
+                &self.on_entities_snapshot,
+                &self.on_tool_finished,
+                &self.on_selection_label,
+            );
+            if action.is_some() {
+                return action;
+            }
+            if request_redraw {
+                return Some(shader::Action::request_redraw());
+            }
+        }
+
+        if self.intersect_version != state.last_intersect_version {
+            state.last_intersect_version = self.intersect_version;
+            let result = state.model.update(
+                SceneInput::Intersect,
                 to_scene_rect(bounds),
                 config,
                 requests,
@@ -1001,6 +1051,8 @@ pub fn scene_widget<'a, Message>(
     zoom_factor: f32,
     zoom_version: u64,
     unite_version: u64,
+    subtract_version: u64,
+    intersect_version: u64,
     request_select_id: Option<u64>,
     request_focus_id: Option<u64>,
     on_entities_snapshot: impl Fn(Vec<SceneEntityInfo>) -> Message + 'static,
@@ -1026,6 +1078,8 @@ where
         zoom_factor,
         zoom_version,
         unite_version,
+        subtract_version,
+        intersect_version,
         on_entities_snapshot: Some(std::rc::Rc::new(on_entities_snapshot)),
         on_tool_finished: Some(std::rc::Rc::new(on_tool_finished)),
         on_selection_label: Some(std::rc::Rc::new(on_selection_label)),

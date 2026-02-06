@@ -81,6 +81,7 @@ pub struct SketchFace {
     pub points: Vec<Vec3>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn pick_face(
     cursor: ScenePoint,
     bounds: SceneRect,

@@ -954,6 +954,8 @@ pub enum SceneInput {
     KeyDelete,
     KeyEscape,
     Unite,
+    Subtract,
+    Intersect,
     MouseWheel { delta_lines: f32 },
     MouseDownLeft { pos: ScenePoint },
     MouseUpLeft,
@@ -1225,7 +1227,7 @@ impl SceneModel {
         );
 
         match input {
-            SceneInput::Unite => {
+            SceneInput::Unite | SceneInput::Subtract | SceneInput::Intersect => {
                 let mut ids = if !self.selected_entities.is_empty() {
                     self.selected_entities.clone()
                 } else if let Some(id) = self.selected {
@@ -1252,11 +1254,46 @@ impl SceneModel {
                     return result;
                 }
 
-                let solids = selected
-                    .iter()
-                    .map(|entity| entity_to_solid(entity))
-                    .collect::<Vec<_>>();
-                let solid = cad::solid_unite(solids.as_slice());
+                let (solid, plane) = match input {
+                    SceneInput::Subtract => {
+                        let base_id = self
+                            .selected
+                            .filter(|id| ids.iter().any(|v| v == id))
+                            .unwrap_or(ids[0]);
+                        let base_entity = self.entities.iter().find(|e| e.id == base_id);
+                        let Some(base_entity) = base_entity else {
+                            return result;
+                        };
+                        let mut cutter_solids = Vec::new();
+                        for id in &ids {
+                            if *id == base_id {
+                                continue;
+                            }
+                            if let Some(entity) = self.entities.iter().find(|e| e.id == *id) {
+                                cutter_solids.push(entity_to_solid(entity));
+                            }
+                        }
+                        let base_solid = entity_to_solid(base_entity);
+                        (
+                            cad::solid_subtract(&base_solid, cutter_solids.as_slice()),
+                            base_entity.plane,
+                        )
+                    }
+                    SceneInput::Intersect => {
+                        let solids = selected
+                            .iter()
+                            .map(|entity| entity_to_solid(entity))
+                            .collect::<Vec<_>>();
+                        (cad::solid_intersect(solids.as_slice()), selected[0].plane)
+                    }
+                    _ => {
+                        let solids = selected
+                            .iter()
+                            .map(|entity| entity_to_solid(entity))
+                            .collect::<Vec<_>>();
+                        (cad::solid_unite(solids.as_slice()), selected[0].plane)
+                    }
+                };
                 let mesh = cad::to_mesh(&solid);
 
                 let (min, max) = match mesh_bounds(&mesh) {
@@ -1276,7 +1313,7 @@ impl SceneModel {
                     kind: SolidKind::Custom,
                     position: center,
                     size,
-                    plane: config.grid_plane,
+                    plane,
                     mesh: Some(mesh),
                 });
 
