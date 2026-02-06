@@ -4,7 +4,6 @@ mod scene;
 mod canvas;
 mod cad;
 mod controls;
-mod camera;
 mod ui;
 
 
