@@ -4,6 +4,7 @@ use truck_meshalgo::prelude::*;
 use truck_modeling::*;
 use truck_polymesh::{Faces, PolygonMesh, StandardAttributes, StandardVertex};
 use truck_shapeops::{and, or};
+use truck_stepio::out::*;
 
 use meshx::mesh::TetMesh;
 #[cfg(not(target_arch = "wasm32"))]
@@ -319,4 +320,38 @@ pub fn solid_subtract(base: &Solid, cutters: &[Solid]) -> Solid {
         }
     }
     result
+}
+
+pub fn save_shape(solid: &Solid, filename: &str) {
+    // output to polygonmesh
+    let mesh_with_topology = solid.triangulation(0.01);
+    let mesh = mesh_with_topology.to_polygon();
+    let obj_path = filename.to_string() + ".obj";
+    let mut obj = std::fs::File::create(&obj_path).unwrap();
+    obj::write(&mesh, &mut obj).unwrap();
+
+    // compress solid data.
+    let compressed = solid.compress();
+
+    // step format display
+    let display = CompleteStepDisplay::new(StepModel::from(&compressed), Default::default());
+    // content of step file
+    let step_string: String = display.to_string();
+    let step_path = filename.to_string() + ".step";
+    std::fs::write(&step_path, &step_string).unwrap();
+}
+
+
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_unite() {
+        let solid1 = cylinder_solid_at([0.0, 0.0, 0.0],  2.0, 1.0);
+        let solid2 = cylinder_solid_at([1.0, 0.0, 0.0], 2.0, 1.5);
+        let united_solid = solid_unite(&[solid1, solid2]);
+
+        // save_shape(&united_solid, "united_solid");
+        assert!(united_solid.is_geometric_consistent());
+    }
 }

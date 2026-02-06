@@ -3020,6 +3020,7 @@ dependencies = [
  "truck-modeling",
  "truck-polymesh",
  "truck-shapeops",
+ "truck-stepio",
  "truck-topology",
  "vello",
  "wgpu",
